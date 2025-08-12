@@ -37,9 +37,6 @@ struct Cli {
 
     #[arg(long)]
     db_path: Option<PathBuf>,
-
-    #[arg(long)]
-    import_tsv: bool,
 }
 
 #[derive(Subcommand)]
@@ -89,12 +86,8 @@ fn main() {
         log::error!("Failed to open database: {e}");
         process::exit(1);
     });
-    let db = db::SledClipboardDb { db: sled_db };
 
-    if cli.import_tsv {
-        db.import_tsv(io::stdin());
-        return;
-    }
+    let db = db::SledClipboardDb { db: sled_db };
 
     match cli.command {
         Some(Command::Store) => {
