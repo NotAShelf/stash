@@ -91,54 +91,47 @@ fn main() {
 
     match cli.command {
         Some(Command::Store) => {
-            log::info!("Executing: Store");
             let state = env::var("STASH_CLIPBOARD_STATE").ok();
             db.store(io::stdin(), cli.max_dedupe_search, cli.max_items, state);
         }
         Some(Command::List) => {
-            log::info!("Executing: List");
             db.list(io::stdout(), cli.preview_width);
         }
         Some(Command::Decode { input }) => {
-            log::info!("Executing: Decode");
             db.decode(io::stdin(), io::stdout(), input);
         }
-        Some(Command::Delete { arg, r#type }) => {
-            log::info!("Executing: Delete");
-            match (arg, r#type.as_deref()) {
-                (Some(s), Some("id")) => {
-                    if let Ok(id) = s.parse::<u64>() {
-                        use std::io::Cursor;
-                        db.delete(Cursor::new(format!("{id}\n")));
-                    } else {
-                        log::error!("Argument is not a valid id");
-                    }
-                }
-                (Some(s), Some("query")) => {
-                    db.query_delete(&s);
-                }
-                (Some(s), None) => {
-                    if let Ok(id) = s.parse::<u64>() {
-                        use std::io::Cursor;
-                        db.delete(Cursor::new(format!("{id}\n")));
-                    } else {
-                        db.query_delete(&s);
-                    }
-                }
-                (None, _) => {
-                    db.delete(io::stdin());
-                }
-                (_, Some(_)) => {
-                    log::error!("Unknown type for --type. Use \"id\" or \"query\".");
+        Some(Command::Delete { arg, r#type }) => match (arg, r#type.as_deref()) {
+            (Some(s), Some("id")) => {
+                if let Ok(id) = s.parse::<u64>() {
+                    use std::io::Cursor;
+                    db.delete(Cursor::new(format!("{id}\n")));
+                } else {
+                    log::error!("Argument is not a valid id");
                 }
             }
-        }
+            (Some(s), Some("query")) => {
+                db.query_delete(&s);
+            }
+            (Some(s), None) => {
+                if let Ok(id) = s.parse::<u64>() {
+                    use std::io::Cursor;
+                    db.delete(Cursor::new(format!("{id}\n")));
+                } else {
+                    db.query_delete(&s);
+                }
+            }
+            (None, _) => {
+                db.delete(io::stdin());
+            }
+            (_, Some(_)) => {
+                log::error!("Unknown type for --type. Use \"id\" or \"query\".");
+            }
+        },
         Some(Command::Wipe) => {
-            log::info!("Executing: Wipe");
             db.wipe();
         }
+
         Some(Command::Import { r#type }) => {
-            log::info!("Executing: Import");
             // Default format is TSV (Cliphist compatible)
             let format = r#type.as_deref().unwrap_or("tsv");
             match format {
