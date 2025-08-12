@@ -1,4 +1,5 @@
 use crate::db::{Entry, SledClipboardDb, detect_mime, u64_to_ivec};
+use log::{error, info};
 use std::io::{self, BufRead};
 
 pub trait ImportCommand {
@@ -17,12 +18,27 @@ impl ImportCommand for SledClipboardDb {
                         contents: val.as_bytes().to_vec(),
                         mime: detect_mime(val.as_bytes()),
                     };
-                    let enc = rmp_serde::encode::to_vec(&entry).unwrap();
-                    self.db.insert(u64_to_ivec(id), enc).unwrap();
-                    imported += 1;
+                    let enc = match rmp_serde::encode::to_vec(&entry) {
+                        Ok(enc) => enc,
+                        Err(e) => {
+                            error!("Failed to encode entry for id {id}: {e}");
+                            continue;
+                        }
+                    };
+                    match self.db.insert(u64_to_ivec(id), enc) {
+                        Ok(_) => {
+                            imported += 1;
+                            info!("Imported entry with id {id}");
+                        }
+                        Err(e) => error!("Failed to insert entry with id {id}: {e}"),
+                    }
+                } else {
+                    error!("Failed to parse id from line: {id_str}");
                 }
+            } else {
+                error!("Malformed TSV line: {line:?}");
             }
         }
-        eprintln!("Imported {imported} records from TSV into sled database.");
+        info!("Imported {imported} records from TSV into sled database.");
     }
 }

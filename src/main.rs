@@ -76,6 +76,7 @@ enum Command {
 }
 
 fn main() {
+    env_logger::init();
     let cli = Cli::parse();
     let db_path = cli.db_path.unwrap_or_else(|| {
         dirs::cache_dir()
@@ -85,10 +86,9 @@ fn main() {
     });
 
     let sled_db = sled::open(&db_path).unwrap_or_else(|e| {
-        eprintln!("Failed to open database: {e}");
+        log::error!("Failed to open database: {e}");
         process::exit(1);
     });
-
     let db = db::SledClipboardDb { db: sled_db };
 
     if cli.import_tsv {
@@ -98,53 +98,54 @@ fn main() {
 
     match cli.command {
         Some(Command::Store) => {
-            let state = env::var("STASH_CLIPBOARD_STATE").ok();
+            log::info!("Executing: Store");
+            let state = env::var("CLIPBOARD_STATE").ok();
             db.store(io::stdin(), cli.max_dedupe_search, cli.max_items, state);
         }
-
         Some(Command::List) => {
+            log::info!("Executing: List");
             db.list(io::stdout(), cli.preview_width);
         }
-
         Some(Command::Decode { input }) => {
+            log::info!("Executing: Decode");
             db.decode(io::stdin(), io::stdout(), input);
         }
-
-        Some(Command::Delete { arg, r#type }) => match (arg, r#type.as_deref()) {
-            (Some(s), Some("id")) => {
-                if let Ok(id) = s.parse::<u64>() {
-                    use std::io::Cursor;
-                    db.delete(Cursor::new(format!("{id}\n")));
-                } else {
-                    eprintln!("Argument is not a valid id");
+        Some(Command::Delete { arg, r#type }) => {
+            log::info!("Executing: Delete");
+            match (arg, r#type.as_deref()) {
+                (Some(s), Some("id")) => {
+                    if let Ok(id) = s.parse::<u64>() {
+                        use std::io::Cursor;
+                        db.delete(Cursor::new(format!("{id}\n")));
+                    } else {
+                        log::error!("Argument is not a valid id");
+                    }
                 }
-            }
-
-            (Some(s), Some("query")) => {
-                db.query_delete(&s);
-            }
-
-            (Some(s), None) => {
-                if let Ok(id) = s.parse::<u64>() {
-                    use std::io::Cursor;
-                    db.delete(Cursor::new(format!("{id}\n")));
-                } else {
+                (Some(s), Some("query")) => {
                     db.query_delete(&s);
                 }
+                (Some(s), None) => {
+                    if let Ok(id) = s.parse::<u64>() {
+                        use std::io::Cursor;
+                        db.delete(Cursor::new(format!("{id}\n")));
+                    } else {
+                        db.query_delete(&s);
+                    }
+                }
+                (None, _) => {
+                    db.delete(io::stdin());
+                }
+                (_, Some(_)) => {
+                    log::error!("Unknown type for --type. Use \"id\" or \"query\".");
+                }
             }
-
-            (None, _) => {
-                db.delete(io::stdin());
-            }
-
-            (_, Some(_)) => {
-                eprintln!("Unknown type for --type. Use \"id\" or \"query\".");
-            }
-        },
+        }
         Some(Command::Wipe) => {
+            log::info!("Executing: Wipe");
             db.wipe();
         }
         Some(Command::Import { r#type }) => {
+            log::info!("Executing: Import");
             // Default format is TSV (Cliphist compatible)
             let format = r#type.as_deref().unwrap_or("tsv");
             match format {
@@ -152,12 +153,12 @@ fn main() {
                     db.import_tsv(io::stdin());
                 }
                 _ => {
-                    eprintln!("Unsupported import format: {format}");
+                    log::error!("Unsupported import format: {format}");
                 }
             }
         }
         _ => {
-            eprintln!("No subcommand provided");
+            log::warn!("No subcommand provided");
         }
     }
 }

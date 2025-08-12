@@ -1,4 +1,5 @@
 use crate::db::{ClipboardDb, SledClipboardDb};
+
 use std::io::Read;
 
 pub trait StoreCommand {
@@ -19,13 +20,12 @@ impl StoreCommand for SledClipboardDb {
         max_items: u64,
         state: Option<String>,
     ) {
-        match state.as_deref() {
-            Some("sensitive") | Some("clear") => {
-                self.delete_last();
-            }
-            _ => {
-                self.store_entry(input, max_dedupe_search, max_items);
-            }
+        if let Some("sensitive" | "clear") = state.as_deref() {
+            self.delete_last();
+            log::info!("Entry deleted");
+        } else {
+            self.store_entry(input, max_dedupe_search, max_items);
+            log::info!("Entry stored");
         }
     }
 }

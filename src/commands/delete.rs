@@ -1,4 +1,5 @@
 use crate::db::{ClipboardDb, SledClipboardDb};
+
 use std::io::Read;
 
 pub trait DeleteCommand {
@@ -8,5 +9,6 @@ pub trait DeleteCommand {
 impl DeleteCommand for SledClipboardDb {
     fn delete(&self, input: impl Read) {
         self.delete_entries(input);
+        log::info!("Entries deleted");
     }
 }

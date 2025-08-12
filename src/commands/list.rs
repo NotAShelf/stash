@@ -8,5 +8,6 @@ pub trait ListCommand {
 impl ListCommand for SledClipboardDb {
     fn list(&self, out: impl Write, preview_width: u32) {
         self.list_entries(out, preview_width);
+        log::info!("Entries listed");
     }
 }

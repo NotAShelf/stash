@@ -3,6 +3,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::str;
 
 use image::{GenericImageView, ImageFormat};
+use log::{error, info, warn};
 use rmp_serde::{decode::from_read, encode::to_vec};
 use serde::{Deserialize, Serialize};
 use sled::{Db, IVec};
@@ -41,9 +42,11 @@ impl ClipboardDb for SledClipboardDb {
     fn store_entry(&self, mut input: impl Read, max_dedupe_search: u64, max_items: u64) {
         let mut buf = Vec::new();
         if input.read_to_end(&mut buf).is_err() || buf.is_empty() || buf.len() > 5 * 1_000_000 {
+            warn!("Input is empty or too large, skipping store.");
             return;
         }
-        if buf.iter().all(|b| b.is_ascii_whitespace()) {
+        if buf.iter().all(u8::is_ascii_whitespace) {
+            warn!("Input is all whitespace, skipping store.");
             return;
         }
 
@@ -57,53 +60,121 @@ impl ClipboardDb for SledClipboardDb {
         };
 
         let id = self.next_sequence();
-        let enc = to_vec(&entry).unwrap();
+        let enc = match to_vec(&entry) {
+            Ok(enc) => enc,
+            Err(e) => {
+                error!("Failed to serialize entry: {e}");
+                return;
+            }
+        };
 
-        self.db.insert(u64_to_ivec(id), enc).unwrap();
+        match self.db.insert(u64_to_ivec(id), enc) {
+            Ok(_) => info!("Stored entry with id {id}"),
+            Err(e) => error!("Failed to store entry: {e}"),
+        }
         self.trim_db(max_items);
     }
 
     fn deduplicate(&self, buf: &[u8], max: u64) {
         let mut count = 0;
+        let mut deduped = 0;
         for item in self.db.iter().rev().take(max as usize) {
-            let (k, v) = item.unwrap();
-            let entry: Entry = from_read(v.as_ref()).unwrap();
+            let (k, v) = match item {
+                Ok((k, v)) => (k, v),
+                Err(e) => {
+                    error!("Error reading entry during deduplication: {e}");
+                    continue;
+                }
+            };
+            let entry: Entry = match from_read(v.as_ref()) {
+                Ok(e) => e,
+                Err(e) => {
+                    error!("Error decoding entry during deduplication: {e}");
+                    continue;
+                }
+            };
             if entry.contents == buf {
-                self.db.remove(k).unwrap();
+                match self.db.remove(k) {
+                    Ok(_) => {
+                        deduped += 1;
+                        info!("Deduplicated an entry");
+                    }
+                    Err(e) => error!("Failed to remove entry during deduplication: {e}"),
+                }
             }
             count += 1;
             if count >= max {
                 break;
             }
         }
+        if deduped > 0 {
+            info!("Deduplicated {deduped} entries");
+        }
     }
 
     fn trim_db(&self, max: u64) {
-        let mut keys: Vec<_> = self.db.iter().rev().map(|kv| kv.unwrap().0).collect();
+        let mut keys: Vec<_> = self
+            .db
+            .iter()
+            .rev()
+            .filter_map(|kv| match kv {
+                Ok((k, _)) => Some(k),
+                Err(e) => {
+                    error!("Failed to read key during trim: {e}");
+                    None
+                }
+            })
+            .collect();
+        let initial_len = keys.len();
         if keys.len() as u64 > max {
             for k in keys.drain((max as usize)..) {
-                self.db.remove(k).unwrap();
+                match self.db.remove(k) {
+                    Ok(_) => info!("Trimmed entry from database"),
+                    Err(e) => error!("Failed to trim entry: {e}"),
+                }
             }
+            info!(
+                "Trimmed {} entries from database",
+                initial_len - max as usize
+            );
         }
     }
 
     fn delete_last(&self) {
         if let Some((k, _)) = self.db.iter().next_back().and_then(Result::ok) {
-            self.db.remove(k).unwrap();
+            match self.db.remove(k) {
+                Ok(_) => info!("Deleted last entry"),
+                Err(e) => error!("Failed to delete last entry: {e}"),
+            }
+        } else {
+            warn!("No entries to delete");
         }
     }
 
     fn wipe_db(&self) {
-        self.db.clear().unwrap();
+        match self.db.clear() {
+            Ok(()) => info!("Wiped database"),
+            Err(e) => error!("Failed to wipe database: {e}"),
+        }
     }
 
     fn list_entries(&self, mut out: impl Write, preview_width: u32) {
+        let mut listed = 0;
         for (k, v) in self.db.iter().rev().filter_map(Result::ok) {
             let id = ivec_to_u64(&k);
-            let entry: Entry = from_read(v.as_ref()).unwrap();
+            let entry: Entry = match from_read(v.as_ref()) {
+                Ok(e) => e,
+                Err(e) => {
+                    error!("Failed to decode entry during list: {e}");
+                    continue;
+                }
+            };
             let preview = preview_entry(&entry.contents, entry.mime.as_deref(), preview_width);
-            writeln!(out, "{id}\t{preview}").unwrap();
+            if writeln!(out, "{id}\t{preview}").is_ok() {
+                listed += 1;
+            }
         }
+        info!("Listed {listed} entries");
     }
 
     fn decode_entry(&self, mut in_: impl Read, mut out: impl Write, input: Option<String>) {
@@ -111,36 +182,88 @@ impl ClipboardDb for SledClipboardDb {
             input
         } else {
             let mut buf = String::new();
-            in_.read_to_string(&mut buf).unwrap();
+            if let Err(e) = in_.read_to_string(&mut buf) {
+                error!("Failed to read input for decode: {e}");
+                return;
+            }
             buf
         };
-
-        let id = extract_id(&s).unwrap();
-        let v = self.db.get(u64_to_ivec(id)).unwrap().unwrap();
-        let entry: Entry = from_read(v.as_ref()).unwrap();
-        out.write_all(&entry.contents).unwrap();
+        let id = match extract_id(&s) {
+            Ok(id) => id,
+            Err(e) => {
+                error!("Failed to extract id for decode: {e}");
+                return;
+            }
+        };
+        let v = match self.db.get(u64_to_ivec(id)) {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                warn!("No entry found for id {id}");
+                return;
+            }
+            Err(e) => {
+                error!("Failed to get entry for decode: {e}");
+                return;
+            }
+        };
+        let entry: Entry = match from_read(v.as_ref()) {
+            Ok(e) => e,
+            Err(e) => {
+                error!("Failed to decode entry: {e}");
+                return;
+            }
+        };
+        if let Err(e) = out.write_all(&entry.contents) {
+            error!("Failed to write decoded entry: {e}");
+        } else {
+            info!("Decoded entry with id {id}");
+        }
     }
 
     fn delete_query(&self, query: &str) {
+        let mut deleted = 0;
         for (k, v) in self.db.iter().filter_map(Result::ok) {
-            let entry: Entry = from_read(v.as_ref()).unwrap();
+            let entry: Entry = match from_read(v.as_ref()) {
+                Ok(e) => e,
+                Err(e) => {
+                    error!("Failed to decode entry during query delete: {e}");
+                    continue;
+                }
+            };
             if entry
                 .contents
                 .windows(query.len())
                 .any(|w| w == query.as_bytes())
             {
-                self.db.remove(k).unwrap();
+                match self.db.remove(k) {
+                    Ok(_) => {
+                        deleted += 1;
+                        info!("Deleted entry matching query");
+                    }
+                    Err(e) => error!("Failed to delete entry during query delete: {e}"),
+                }
             }
         }
+        info!("Deleted {deleted} entries matching query '{query}'");
     }
 
     fn delete_entries(&self, in_: impl Read) {
         let reader = BufReader::new(in_);
+        let mut deleted = 0;
         for line in reader.lines().map_while(Result::ok) {
             if let Ok(id) = extract_id(&line) {
-                self.db.remove(u64_to_ivec(id)).unwrap();
+                match self.db.remove(u64_to_ivec(id)) {
+                    Ok(_) => {
+                        deleted += 1;
+                        info!("Deleted entry with id {id}");
+                    }
+                    Err(e) => error!("Failed to delete entry with id {id}: {e}"),
+                }
+            } else {
+                warn!("Failed to extract id from line: {line}");
             }
         }
+        info!("Deleted {deleted} entries by id from stdin");
     }
 
     fn next_sequence(&self) -> u64 {
@@ -148,7 +271,7 @@ impl ClipboardDb for SledClipboardDb {
             .db
             .iter()
             .next_back()
-            .and_then(|r| r.ok())
+            .and_then(std::result::Result::ok)
             .map(|(k, _)| ivec_to_u64(&k));
         last.unwrap_or(0) + 1
     }
@@ -165,7 +288,10 @@ pub fn u64_to_ivec(v: u64) -> IVec {
 }
 
 pub fn ivec_to_u64(v: &IVec) -> u64 {
-    let arr: [u8; 8] = v.as_ref().try_into().unwrap();
+    let arr: [u8; 8] = if let Ok(arr) = v.as_ref().try_into() { arr } else {
+        error!("Failed to convert IVec to u64: invalid length");
+        return 0;
+    };
     u64::from_be_bytes(arr)
 }
 
