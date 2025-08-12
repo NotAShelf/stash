@@ -3,7 +3,7 @@
   rustPlatform,
 }:
 rustPlatform.buildRustPackage (finalAttrs: {
-  pname = "sample-rust";
+  pname = "stash";
   version = "0.1.0";
 
   src = let
@@ -13,18 +13,24 @@ rustPlatform.buildRustPackage (finalAttrs: {
     fs.toSource {
       root = s;
       fileset = fs.unions [
-        (fs.fileFilter (file: builtins.any file.hasExt ["rs"]) s + /src)
+        (fs.fileFilter (file: builtins.any file.hasExt ["rs"]) (s + /src))
         (s + /Cargo.lock)
         (s + /Cargo.toml)
       ];
     };
 
   cargoLock.lockFile = "${finalAttrs.src}/Cargo.lock";
-  useFetchCargoVendor = true;
   enableParallelBuilding = true;
 
+  postInstall = ''
+    mkdir -p $out
+    install -Dm755 ${../vendor/stash.service} $out/share/stash.service
+  '';
+
   meta = {
-    description = "Experimental nftables ruleset formatter and prettier";
-    maintainers = with lib.licenses; [NotAShelf];
+    description = "Wayland clipboard manager with fast persistent history and multi-media support";
+    maintainers = [lib.maintainers.NotAShelf];
+    license = lib.licenses.mpl20;
+    mainProgram = "stash";
   };
 })

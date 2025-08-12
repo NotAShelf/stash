@@ -7,7 +7,6 @@
   }: let
     systems = ["x86_64-linux" "aarch64-linux"];
     forEachSystem = nixpkgs.lib.genAttrs systems;
-
     pkgsForEach = nixpkgs.legacyPackages;
   in {
     packages = forEachSystem (system: {
