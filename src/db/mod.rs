@@ -130,7 +130,12 @@ impl ClipboardDb for SledClipboardDb {
     fn deduplicate(&self, buf: &[u8], max: u64) -> Result<usize, StashError> {
         let mut count = 0;
         let mut deduped = 0;
-        for item in self.db.iter().rev().take(max as usize) {
+        for item in self
+            .db
+            .iter()
+            .rev()
+            .take(usize::try_from(max).unwrap_or(usize::MAX))
+        {
             let (k, v) = match item {
                 Ok((k, v)) => (k, v),
                 Err(e) => return Err(StashError::DeduplicationRead(e.to_string())),
@@ -166,7 +171,7 @@ impl ClipboardDb for SledClipboardDb {
             })
             .collect();
         if keys.len() as u64 > max {
-            for k in keys.drain((max as usize)..) {
+            for k in keys.drain(usize::try_from(max).unwrap_or(0)..) {
                 self.db
                     .remove(k)
                     .map_err(|e| StashError::Trim(e.to_string()))?;
@@ -225,7 +230,7 @@ impl ClipboardDb for SledClipboardDb {
             .db
             .get(u64_to_ivec(id))
             .map_err(|e| StashError::DecodeGet(e.to_string()))?
-            .ok_or_else(|| StashError::DecodeNoEntry(id))?;
+            .ok_or(StashError::DecodeNoEntry(id))?;
         let entry: Entry =
             from_read(v.as_ref()).map_err(|e| StashError::DecodeDecode(e.to_string()))?;
 
@@ -361,7 +366,7 @@ pub fn truncate(s: &str, max: usize, ellip: &str) -> String {
 
 pub fn size_str(size: usize) -> String {
     let units = ["B", "KiB", "MiB"];
-    let mut fsize = size as f64;
+    let mut fsize = f64::from(u32::try_from(size).unwrap_or(u32::MAX));
     let mut i = 0;
     while fsize >= 1024.0 && i < units.len() - 1 {
         fsize /= 1024.0;
