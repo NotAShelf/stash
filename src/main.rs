@@ -5,26 +5,18 @@ use std::{
     process,
 };
 
-use clap::CommandFactory;
-
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 mod commands;
 mod db;
 mod import;
-
-use crate::db::ClipboardDb;
-
-use smol::Timer;
-use std::io::Read;
-use std::time::Duration;
-use wl_clipboard_rs::paste::{ClipboardType, Seat, get_contents};
 
 use crate::commands::decode::DecodeCommand;
 use crate::commands::delete::DeleteCommand;
 use crate::commands::list::ListCommand;
 use crate::commands::query::QueryCommand;
 use crate::commands::store::StoreCommand;
+use crate::commands::watch::WatchCommand;
 use crate::commands::wipe::WipeCommand;
 use crate::import::ImportCommand;
 
@@ -57,7 +49,11 @@ enum Command {
     Store,
 
     /// List clipboard history
-    List,
+    List {
+        /// Output format: "tsv" (default) or "json"
+        #[arg(long, value_parser = ["tsv", "json"])]
+        format: Option<String>,
+    },
 
     /// Decode and output clipboard entry by id
     Decode { input: Option<String> },
@@ -97,67 +93,6 @@ fn report_error<T>(result: Result<T, impl std::fmt::Display>, context: &str) -> 
     }
 }
 
-/// Watch clipboard and store changes
-async fn run_daemon(db: &db::SqliteClipboardDb, max_dedupe_search: u64, max_items: u64) {
-    log::info!("Starting clipboard watch daemon");
-
-    // Initialize with current clipboard to avoid duplicating on startup
-    let mut last_contents: Option<Vec<u8>> = match get_contents(
-        ClipboardType::Regular,
-        Seat::Unspecified,
-        wl_clipboard_rs::paste::MimeType::Any,
-    ) {
-        Ok((mut reader, _)) => {
-            let mut buf = Vec::new();
-            if reader.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
-                Some(buf)
-            } else {
-                None
-            }
-        }
-        Err(_) => None,
-    };
-
-    loop {
-        match get_contents(
-            ClipboardType::Regular,
-            Seat::Unspecified,
-            wl_clipboard_rs::paste::MimeType::Any,
-        ) {
-            Ok((mut reader, mime_type)) => {
-                let mut buf = Vec::new();
-                if let Err(e) = reader.read_to_end(&mut buf) {
-                    log::error!("Failed to read clipboard contents: {e}");
-                    Timer::after(Duration::from_millis(500)).await;
-                    continue;
-                }
-                // Only store if changed and not empty
-                if !buf.is_empty() && Some(&buf) != last_contents.as_ref() {
-                    last_contents = Some(buf.clone());
-                    let mime = Some(mime_type.to_string());
-                    let entry = db::Entry {
-                        contents: buf,
-                        mime,
-                    };
-                    let id = db.next_sequence();
-                    match db.store_entry(&entry.contents[..], max_dedupe_search, max_items) {
-                        Ok(_) => log::info!("Stored new clipboard entry (id: {id})"),
-                        Err(e) => log::error!("Failed to store clipboard entry: {e}"),
-                    }
-                }
-            }
-            Err(e) => {
-                // Only log actual errors, not empty clipboard
-                let error_msg = e.to_string();
-                if !error_msg.contains("empty") {
-                    log::error!("Failed to get clipboard contents: {e}");
-                }
-            }
-        }
-        Timer::after(Duration::from_millis(500)).await;
-    }
-}
-
 fn main() {
     smol::block_on(async {
         let cli = Cli::parse();
@@ -193,11 +128,30 @@ fn main() {
                     "Failed to store entry",
                 );
             }
-            Some(Command::List) => {
-                report_error(
-                    db.list(io::stdout(), cli.preview_width),
-                    "Failed to list entries",
-                );
+            Some(Command::List { format }) => {
+                let format = format.as_deref().unwrap_or("tsv");
+                match format {
+                    "tsv" => {
+                        report_error(
+                            db.list(io::stdout(), cli.preview_width),
+                            "Failed to list entries",
+                        );
+                    }
+                    "json" => {
+                        // Implement JSON output
+                        match db.list_json() {
+                            Ok(json) => {
+                                println!("{}", json);
+                            }
+                            Err(e) => {
+                                log::error!("Failed to list entries as JSON: {}", e);
+                            }
+                        }
+                    }
+                    _ => {
+                        log::error!("Unsupported format: {}", format);
+                    }
+                }
             }
             Some(Command::Decode { input }) => {
                 report_error(
@@ -255,7 +209,7 @@ fn main() {
                 }
             }
             Some(Command::Watch) => {
-                run_daemon(&db, cli.max_dedupe_search, cli.max_items).await;
+                db.watch(cli.max_dedupe_search, cli.max_items);
             }
             None => {
                 if let Err(e) = Cli::command().print_help() {
