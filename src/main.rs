@@ -11,6 +11,12 @@ mod commands;
 mod db;
 mod import;
 
+use crate::db::ClipboardDb;
+
+use std::io::Read;
+use std::time::Duration;
+use wl_clipboard_rs::paste::{ClipboardType, Seat, get_contents};
+
 use crate::commands::decode::DecodeCommand;
 use crate::commands::delete::DeleteCommand;
 use crate::commands::list::ListCommand;
@@ -73,6 +79,9 @@ enum Command {
         #[arg(long, value_parser = ["tsv"])]
         r#type: Option<String>,
     },
+
+    /// Watch clipboard for changes and store automatically
+    Watch,
 }
 
 fn report_error<T>(result: Result<T, impl std::fmt::Display>, context: &str) -> Option<T> {
@@ -82,6 +91,48 @@ fn report_error<T>(result: Result<T, impl std::fmt::Display>, context: &str) -> 
             log::error!("{context}: {e}");
             None
         }
+    }
+}
+
+/// Watch clipboard and store changes
+fn run_daemon(db: &db::SledClipboardDb, max_dedupe_search: u64, max_items: u64) {
+    log::info!("Starting clipboard watch daemon (Wayland)");
+
+    let mut last_contents: Option<Vec<u8>> = None;
+
+    loop {
+        match get_contents(
+            ClipboardType::Regular,
+            Seat::Unspecified,
+            wl_clipboard_rs::paste::MimeType::Any,
+        ) {
+            Ok((mut reader, mime_type)) => {
+                let mut buf = Vec::new();
+                if let Err(e) = reader.read_to_end(&mut buf) {
+                    log::error!("Failed to read clipboard contents: {e}");
+                    std::thread::sleep(Duration::from_millis(500));
+                    continue;
+                }
+                // Only store if changed and not empty
+                if !buf.is_empty() && Some(&buf) != last_contents.as_ref() {
+                    last_contents = Some(buf.clone());
+                    let mime = Some(mime_type.to_string());
+                    let entry = db::Entry {
+                        contents: buf,
+                        mime,
+                    };
+                    let id = db.next_sequence();
+                    match db.store_entry(&entry.contents[..], max_dedupe_search, max_items) {
+                        Ok(_) => log::info!("Stored new clipboard entry (id: {id})"),
+                        Err(e) => log::error!("Failed to store clipboard entry: {e}"),
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!("Failed to get clipboard contents: {e}");
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
     }
 }
 
@@ -173,6 +224,9 @@ fn main() {
                     log::error!("Unsupported import format: {format}");
                 }
             }
+        }
+        Some(Command::Watch) => {
+            run_daemon(&db, cli.max_dedupe_search, cli.max_items);
         }
         _ => {
             log::warn!("No subcommand provided");
