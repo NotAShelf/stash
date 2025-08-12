@@ -165,7 +165,17 @@ impl ClipboardDb for SqliteClipboardDb {
             return Err(StashError::AllWhitespace);
         }
 
-        let mime = detect_mime(&buf);
+        let mime = match detect_mime(&buf) {
+            None => {
+                // If valid UTF-8, treat as text/plain
+                if std::str::from_utf8(&buf).is_ok() {
+                    Some("text/plain".to_string())
+                } else {
+                    None
+                }
+            }
+            other => other,
+        };
 
         self.deduplicate(&buf, max_dedupe_search)?;
 
