@@ -9,6 +9,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+use serde_json::json;
+
 #[derive(Error, Debug)]
 pub enum StashError {
     #[error("Input is empty or too large, skipping store.")]
@@ -100,6 +104,49 @@ impl SqliteClipboardDb {
         )
         .map_err(|e| StashError::Store(e.to_string()))?;
         Ok(Self { conn })
+    }
+}
+
+impl SqliteClipboardDb {
+    pub fn list_json(&self) -> Result<String, StashError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, contents, mime FROM clipboard ORDER BY id DESC")
+            .map_err(|e| StashError::ListDecode(e.to_string()))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| StashError::ListDecode(e.to_string()))?;
+
+        let mut entries = Vec::new();
+
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| StashError::ListDecode(e.to_string()))?
+        {
+            let id: u64 = row
+                .get(0)
+                .map_err(|e| StashError::ListDecode(e.to_string()))?;
+            let contents: Vec<u8> = row
+                .get(1)
+                .map_err(|e| StashError::ListDecode(e.to_string()))?;
+            let mime: Option<String> = row
+                .get(2)
+                .map_err(|e| StashError::ListDecode(e.to_string()))?;
+            let contents_str = match mime.as_deref() {
+                Some(m) if m.starts_with("text/") || m == "application/json" => {
+                    String::from_utf8_lossy(&contents).to_string()
+                }
+                _ => STANDARD.encode(&contents),
+            };
+            entries.push(json!({
+                "id": id,
+                "contents": contents_str,
+                "mime": mime,
+            }));
+        }
+
+        Ok(serde_json::to_string_pretty(&entries)
+            .map_err(|e| StashError::ListDecode(e.to_string()))?)
     }
 }
 
