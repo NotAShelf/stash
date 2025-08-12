@@ -15,6 +15,7 @@ mod import;
 
 use crate::db::ClipboardDb;
 
+use smol::Timer;
 use std::io::Read;
 use std::time::Duration;
 use wl_clipboard_rs::paste::{ClipboardType, Seat, get_contents};
@@ -97,8 +98,8 @@ fn report_error<T>(result: Result<T, impl std::fmt::Display>, context: &str) -> 
 }
 
 /// Watch clipboard and store changes
-fn run_daemon(db: &db::SqliteClipboardDb, max_dedupe_search: u64, max_items: u64) {
-    log::info!("Starting clipboard watch daemon (Wayland)");
+async fn run_daemon(db: &db::SqliteClipboardDb, max_dedupe_search: u64, max_items: u64) {
+    log::info!("Starting clipboard watch daemon");
 
     let mut last_contents: Option<Vec<u8>> = None;
 
@@ -112,7 +113,7 @@ fn run_daemon(db: &db::SqliteClipboardDb, max_dedupe_search: u64, max_items: u64
                 let mut buf = Vec::new();
                 if let Err(e) = reader.read_to_end(&mut buf) {
                     log::error!("Failed to read clipboard contents: {e}");
-                    std::thread::sleep(Duration::from_millis(500));
+                    Timer::after(Duration::from_millis(500)).await;
                     continue;
                 }
                 // Only store if changed and not empty
@@ -131,116 +132,122 @@ fn run_daemon(db: &db::SqliteClipboardDb, max_dedupe_search: u64, max_items: u64
                 }
             }
             Err(e) => {
-                log::error!("Failed to get clipboard contents: {e}");
+                // Only log actual errors, not empty clipboard
+                let error_msg = e.to_string();
+                if !error_msg.contains("empty") {
+                    log::error!("Failed to get clipboard contents: {e}");
+                }
             }
         }
-        std::thread::sleep(Duration::from_millis(500));
+        Timer::after(Duration::from_millis(500)).await;
     }
 }
 
 fn main() {
-    let cli = Cli::parse();
-    env_logger::Builder::new()
-        .filter_level(cli.verbosity.into())
-        .init();
+    smol::block_on(async {
+        let cli = Cli::parse();
+        env_logger::Builder::new()
+            .filter_level(cli.verbosity.into())
+            .init();
 
-    let db_path = cli.db_path.unwrap_or_else(|| {
-        dirs::cache_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join("stash")
-            .join("db")
-    });
+        let db_path = cli.db_path.unwrap_or_else(|| {
+            dirs::cache_dir()
+                .unwrap_or_else(|| PathBuf::from("/tmp"))
+                .join("stash")
+                .join("db")
+        });
 
-    let conn = rusqlite::Connection::open(&db_path).unwrap_or_else(|e| {
-        log::error!("Failed to open SQLite database: {e}");
-        process::exit(1);
-    });
-
-    let db = match db::SqliteClipboardDb::new(conn) {
-        Ok(db) => db,
-        Err(e) => {
-            log::error!("Failed to initialize SQLite database: {e}");
+        let conn = rusqlite::Connection::open(&db_path).unwrap_or_else(|e| {
+            log::error!("Failed to open SQLite database: {e}");
             process::exit(1);
-        }
-    };
+        });
 
-    match cli.command {
-        Some(Command::Store) => {
-            let state = env::var("STASH_CLIPBOARD_STATE").ok();
-            report_error(
-                db.store(io::stdin(), cli.max_dedupe_search, cli.max_items, state),
-                "Failed to store entry",
-            );
-        }
-        Some(Command::List) => {
-            report_error(
-                db.list(io::stdout(), cli.preview_width),
-                "Failed to list entries",
-            );
-        }
-        Some(Command::Decode { input }) => {
-            report_error(
-                db.decode(io::stdin(), io::stdout(), input),
-                "Failed to decode entry",
-            );
-        }
-        Some(Command::Delete { arg, r#type }) => match (arg, r#type.as_deref()) {
-            (Some(s), Some("id")) => {
-                if let Ok(id) = s.parse::<u64>() {
-                    use std::io::Cursor;
-                    report_error(
-                        db.delete(Cursor::new(format!("{id}\n"))),
-                        "Failed to delete entry by id",
-                    );
-                } else {
-                    log::error!("Argument is not a valid id");
+        let db = match db::SqliteClipboardDb::new(conn) {
+            Ok(db) => db,
+            Err(e) => {
+                log::error!("Failed to initialize SQLite database: {e}");
+                process::exit(1);
+            }
+        };
+
+        match cli.command {
+            Some(Command::Store) => {
+                let state = env::var("STASH_CLIPBOARD_STATE").ok();
+                report_error(
+                    db.store(io::stdin(), cli.max_dedupe_search, cli.max_items, state),
+                    "Failed to store entry",
+                );
+            }
+            Some(Command::List) => {
+                report_error(
+                    db.list(io::stdout(), cli.preview_width),
+                    "Failed to list entries",
+                );
+            }
+            Some(Command::Decode { input }) => {
+                report_error(
+                    db.decode(io::stdin(), io::stdout(), input),
+                    "Failed to decode entry",
+                );
+            }
+            Some(Command::Delete { arg, r#type }) => match (arg, r#type.as_deref()) {
+                (Some(s), Some("id")) => {
+                    if let Ok(id) = s.parse::<u64>() {
+                        use std::io::Cursor;
+                        report_error(
+                            db.delete(Cursor::new(format!("{id}\n"))),
+                            "Failed to delete entry by id",
+                        );
+                    } else {
+                        log::error!("Argument is not a valid id");
+                    }
                 }
-            }
-            (Some(s), Some("query")) => {
-                report_error(db.query_delete(&s), "Failed to delete entry by query");
-            }
-            (Some(s), None) => {
-                if let Ok(id) = s.parse::<u64>() {
-                    use std::io::Cursor;
-                    report_error(
-                        db.delete(Cursor::new(format!("{id}\n"))),
-                        "Failed to delete entry by id",
-                    );
-                } else {
+                (Some(s), Some("query")) => {
                     report_error(db.query_delete(&s), "Failed to delete entry by query");
                 }
+                (Some(s), None) => {
+                    if let Ok(id) = s.parse::<u64>() {
+                        use std::io::Cursor;
+                        report_error(
+                            db.delete(Cursor::new(format!("{id}\n"))),
+                            "Failed to delete entry by id",
+                        );
+                    } else {
+                        report_error(db.query_delete(&s), "Failed to delete entry by query");
+                    }
+                }
+                (None, _) => {
+                    report_error(db.delete(io::stdin()), "Failed to delete entry from stdin");
+                }
+                (_, Some(_)) => {
+                    log::error!("Unknown type for --type. Use \"id\" or \"query\".");
+                }
+            },
+            Some(Command::Wipe) => {
+                report_error(db.wipe(), "Failed to wipe database");
             }
-            (None, _) => {
-                report_error(db.delete(io::stdin()), "Failed to delete entry from stdin");
-            }
-            (_, Some(_)) => {
-                log::error!("Unknown type for --type. Use \"id\" or \"query\".");
-            }
-        },
-        Some(Command::Wipe) => {
-            report_error(db.wipe(), "Failed to wipe database");
-        }
 
-        Some(Command::Import { r#type }) => {
-            // Default format is TSV (Cliphist compatible)
-            let format = r#type.as_deref().unwrap_or("tsv");
-            match format {
-                "tsv" => {
-                    db.import_tsv(io::stdin());
-                }
-                _ => {
-                    log::error!("Unsupported import format: {format}");
+            Some(Command::Import { r#type }) => {
+                // Default format is TSV (Cliphist compatible)
+                let format = r#type.as_deref().unwrap_or("tsv");
+                match format {
+                    "tsv" => {
+                        db.import_tsv(io::stdin());
+                    }
+                    _ => {
+                        log::error!("Unsupported import format: {format}");
+                    }
                 }
             }
-        }
-        Some(Command::Watch) => {
-            run_daemon(&db, cli.max_dedupe_search, cli.max_items);
-        }
-        None => {
-            if let Err(e) = Cli::command().print_help() {
-                eprintln!("Failed to print help: {e}");
+            Some(Command::Watch) => {
+                run_daemon(&db, cli.max_dedupe_search, cli.max_items).await;
             }
-            println!();
+            None => {
+                if let Err(e) = Cli::command().print_help() {
+                    eprintln!("Failed to print help: {e}");
+                }
+                println!();
+            }
         }
-    }
+    });
 }
