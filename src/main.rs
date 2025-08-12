@@ -98,43 +98,61 @@ fn main() {
     match cli.command {
         Some(Command::Store) => {
             let state = env::var("STASH_CLIPBOARD_STATE").ok();
-            db.store(io::stdin(), cli.max_dedupe_search, cli.max_items, state);
+            if let Err(e) = db.store(io::stdin(), cli.max_dedupe_search, cli.max_items, state) {
+                log::error!("Failed to store entry: {e}");
+            }
         }
         Some(Command::List) => {
-            db.list(io::stdout(), cli.preview_width);
+            if let Err(e) = db.list(io::stdout(), cli.preview_width) {
+                log::error!("Failed to list entries: {e}");
+            }
         }
         Some(Command::Decode { input }) => {
-            db.decode(io::stdin(), io::stdout(), input);
+            if let Err(e) = db.decode(io::stdin(), io::stdout(), input) {
+                log::error!("Failed to decode entry: {e}");
+            }
         }
         Some(Command::Delete { arg, r#type }) => match (arg, r#type.as_deref()) {
             (Some(s), Some("id")) => {
                 if let Ok(id) = s.parse::<u64>() {
                     use std::io::Cursor;
-                    db.delete(Cursor::new(format!("{id}\n")));
+                    if let Err(e) = db.delete(Cursor::new(format!("{id}\n"))) {
+                        log::error!("Failed to delete entry by id: {e}");
+                    }
                 } else {
                     log::error!("Argument is not a valid id");
                 }
             }
             (Some(s), Some("query")) => {
-                db.query_delete(&s);
+                if let Err(e) = db.query_delete(&s) {
+                    log::error!("Failed to delete entry by query: {e}");
+                }
             }
             (Some(s), None) => {
                 if let Ok(id) = s.parse::<u64>() {
                     use std::io::Cursor;
-                    db.delete(Cursor::new(format!("{id}\n")));
+                    if let Err(e) = db.delete(Cursor::new(format!("{id}\n"))) {
+                        log::error!("Failed to delete entry by id: {e}");
+                    }
                 } else {
-                    db.query_delete(&s);
+                    if let Err(e) = db.query_delete(&s) {
+                        log::error!("Failed to delete entry by query: {e}");
+                    }
                 }
             }
             (None, _) => {
-                db.delete(io::stdin());
+                if let Err(e) = db.delete(io::stdin()) {
+                    log::error!("Failed to delete entry from stdin: {e}");
+                }
             }
             (_, Some(_)) => {
                 log::error!("Unknown type for --type. Use \"id\" or \"query\".");
             }
         },
         Some(Command::Wipe) => {
-            db.wipe();
+            if let Err(e) = db.wipe() {
+                log::error!("Failed to wipe database: {e}");
+            }
         }
 
         Some(Command::Import { r#type }) => {

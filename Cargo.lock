@@ -1210,6 +1210,7 @@ dependencies = [
  "rmp-serde",
  "serde",
  "sled",
+ "thiserror 2.0.14",
 ]
 
 [[package]]
