@@ -1,0 +1,13 @@
+[Unit]
+Description=Wayland clipboard manager with fast persistent history and multi-media support
+PartOf=graphical-session.target
+After=graphical-session.target
+Requisite=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=wl-paste --watch stash store
+Restart=on-failure
+
+[Install]
+WantedBy=graphical-session.target
