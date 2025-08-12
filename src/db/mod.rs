@@ -2,7 +2,7 @@ use std::fmt;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::str;
 
-use image::{GenericImageView, ImageFormat};
+use imagesize::{ImageSize, ImageType};
 use log::{error, info};
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -325,23 +325,19 @@ pub fn extract_id(input: &str) -> Result<u64, &'static str> {
 }
 
 pub fn detect_mime(data: &[u8]) -> Option<String> {
-    if image::guess_format(data).is_ok() {
-        match image::guess_format(data) {
-            Ok(fmt) => Some(
-                match fmt {
-                    ImageFormat::Png => "image/png",
-                    ImageFormat::Jpeg => "image/jpeg",
-                    ImageFormat::Gif => "image/gif",
-                    ImageFormat::Bmp => "image/bmp",
-                    ImageFormat::Tiff => "image/tiff",
-                    _ => "application/octet-stream",
-                }
-                .to_string(),
-            ),
-            Err(_) => None,
-        }
-    } else if data.is_ascii() {
-        Some("text/plain".into())
+    if let Ok(img_type) = imagesize::image_type(data) {
+        Some(
+            match img_type {
+                ImageType::Png => "image/png",
+                ImageType::Jpeg => "image/jpeg",
+                ImageType::Gif => "image/gif",
+                ImageType::Bmp => "image/bmp",
+                ImageType::Tiff => "image/tiff",
+                ImageType::Webp => "image/webp",
+                _ => "application/octet-stream",
+            }
+            .to_string(),
+        )
     } else {
         None
     }
@@ -350,14 +346,17 @@ pub fn detect_mime(data: &[u8]) -> Option<String> {
 pub fn preview_entry(data: &[u8], mime: Option<&str>, width: u32) -> String {
     if let Some(mime) = mime {
         if mime.starts_with("image/") {
-            if let Ok(img) = image::load_from_memory(data) {
-                let (w, h) = img.dimensions();
+            if let Ok(ImageSize {
+                width: img_width,
+                height: img_height,
+            }) = imagesize::blob_size(data)
+            {
                 return format!(
                     "[[ binary data {} {} {}x{} ]]",
                     size_str(data.len()),
                     mime,
-                    w,
-                    h
+                    img_width,
+                    img_height
                 );
             }
         } else if mime == "application/json" || mime.starts_with("text/") {
