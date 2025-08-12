@@ -1,4 +1,4 @@
-use crate::db::{ClipboardDb, SledClipboardDb, StashError};
+use crate::db::{ClipboardDb, SqliteClipboardDb, StashError};
 
 use std::io::Read;
 
@@ -6,7 +6,7 @@ pub trait DeleteCommand {
     fn delete(&self, input: impl Read) -> Result<usize, StashError>;
 }
 
-impl DeleteCommand for SledClipboardDb {
+impl DeleteCommand for SqliteClipboardDb {
     fn delete(&self, input: impl Read) -> Result<usize, StashError> {
         match self.delete_entries(input) {
             Ok(deleted) => {

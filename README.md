@@ -79,7 +79,7 @@ must handle the migration yourself, with one simple command.
 
 ```bash
 $ cliphist list --db ~/.cache/cliphist/db | stash --import-tsv
-# > Imported 750 records from TSV into sled database.
+# > Imported 750 records from TSV into database.
 ```
 
 Alternatively, you may first export from Cliphist and _then_ import the
@@ -88,5 +88,5 @@ database.
 ```bash
 $ cliphist list --db ~/.cache/cliphist/db > cliphist.tsv
 $ stash --import-tsv < cliphist.tsv
-# > Imported 750 records from TSV into sled database.
+# > Imported 750 records from TSV into database.
 ```

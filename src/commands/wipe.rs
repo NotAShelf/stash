@@ -1,4 +1,4 @@
-use crate::db::{ClipboardDb, SledClipboardDb};
+use crate::db::{ClipboardDb, SqliteClipboardDb};
 
 use crate::db::StashError;
 
@@ -6,7 +6,7 @@ pub trait WipeCommand {
     fn wipe(&self) -> Result<(), StashError>;
 }
 
-impl WipeCommand for SledClipboardDb {
+impl WipeCommand for SqliteClipboardDb {
     fn wipe(&self) -> Result<(), StashError> {
         self.wipe_db()?;
         log::info!("Database wiped");

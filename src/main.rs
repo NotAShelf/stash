@@ -95,7 +95,7 @@ fn report_error<T>(result: Result<T, impl std::fmt::Display>, context: &str) -> 
 }
 
 /// Watch clipboard and store changes
-fn run_daemon(db: &db::SledClipboardDb, max_dedupe_search: u64, max_items: u64) {
+fn run_daemon(db: &db::SqliteClipboardDb, max_dedupe_search: u64, max_items: u64) {
     log::info!("Starting clipboard watch daemon (Wayland)");
 
     let mut last_contents: Option<Vec<u8>> = None;
@@ -149,12 +149,18 @@ fn main() {
             .join("db")
     });
 
-    let sled_db = sled::open(&db_path).unwrap_or_else(|e| {
-        log::error!("Failed to open database: {e}");
+    let conn = rusqlite::Connection::open(&db_path).unwrap_or_else(|e| {
+        log::error!("Failed to open SQLite database: {e}");
         process::exit(1);
     });
 
-    let db = db::SledClipboardDb { db: sled_db };
+    let db = match db::SqliteClipboardDb::new(conn) {
+        Ok(db) => db,
+        Err(e) => {
+            log::error!("Failed to initialize SQLite database: {e}");
+            process::exit(1);
+        }
+    };
 
     match cli.command {
         Some(Command::Store) => {

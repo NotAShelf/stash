@@ -1,4 +1,4 @@
-use crate::db::{ClipboardDb, SledClipboardDb};
+use crate::db::{ClipboardDb, SqliteClipboardDb};
 
 use std::io::{Read, Write};
 
@@ -13,7 +13,7 @@ pub trait DecodeCommand {
     ) -> Result<(), StashError>;
 }
 
-impl DecodeCommand for SledClipboardDb {
+impl DecodeCommand for SqliteClipboardDb {
     fn decode(
         &self,
         in_: impl Read,

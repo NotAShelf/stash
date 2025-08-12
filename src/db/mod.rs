@@ -4,9 +4,9 @@ use std::str;
 
 use image::{GenericImageView, ImageFormat};
 use log::{error, info};
-use rmp_serde::{decode::from_read, encode::to_vec};
+
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use sled::{Db, IVec};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -15,8 +15,7 @@ pub enum StashError {
     EmptyOrTooLarge,
     #[error("Input is all whitespace, skipping store.")]
     AllWhitespace,
-    #[error("Failed to serialize entry: {0}")]
-    Serialize(String),
+
     #[error("Failed to store entry: {0}")]
     Store(String),
     #[error("Error reading entry during deduplication: {0}")]
@@ -41,10 +40,7 @@ pub enum StashError {
     DecodeExtractId(String),
     #[error("Failed to get entry for decode: {0}")]
     DecodeGet(String),
-    #[error("No entry found for id {0}")]
-    DecodeNoEntry(u64),
-    #[error("Failed to decode entry: {0}")]
-    DecodeDecode(String),
+
     #[error("Failed to write decoded entry: {0}")]
     DecodeWrite(String),
     #[error("Failed to delete entry during query delete: {0}")]
@@ -89,11 +85,25 @@ impl fmt::Display for Entry {
     }
 }
 
-pub struct SledClipboardDb {
-    pub db: Db,
+pub struct SqliteClipboardDb {
+    pub conn: Connection,
 }
 
-impl ClipboardDb for SledClipboardDb {
+impl SqliteClipboardDb {
+    pub fn new(conn: Connection) -> Result<Self, StashError> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS clipboard (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                contents BLOB NOT NULL,
+                mime TEXT
+            );",
+        )
+        .map_err(|e| StashError::Store(e.to_string()))?;
+        Ok(Self { conn })
+    }
+}
+
+impl ClipboardDb for SqliteClipboardDb {
     fn store_entry(
         &self,
         mut input: impl Read,
@@ -112,98 +122,111 @@ impl ClipboardDb for SledClipboardDb {
 
         self.deduplicate(&buf, max_dedupe_search)?;
 
-        let entry = Entry {
-            contents: buf.clone(),
-            mime,
-        };
-
-        let id = self.next_sequence();
-        let enc = to_vec(&entry).map_err(|e| StashError::Serialize(e.to_string()))?;
-
-        self.db
-            .insert(u64_to_ivec(id), enc)
+        self.conn
+            .execute(
+                "INSERT INTO clipboard (contents, mime) VALUES (?1, ?2)",
+                params![buf, mime],
+            )
             .map_err(|e| StashError::Store(e.to_string()))?;
+
         self.trim_db(max_items)?;
-        Ok(id)
+        Ok(self.next_sequence())
     }
 
     fn deduplicate(&self, buf: &[u8], max: u64) -> Result<usize, StashError> {
-        let mut count = 0;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, contents FROM clipboard ORDER BY id DESC LIMIT ?1")
+            .map_err(|e| StashError::DeduplicationRead(e.to_string()))?;
+        let mut rows = stmt
+            .query(params![i64::try_from(max).unwrap_or(i64::MAX)])
+            .map_err(|e| StashError::DeduplicationRead(e.to_string()))?;
         let mut deduped = 0;
-        for item in self
-            .db
-            .iter()
-            .rev()
-            .take(usize::try_from(max).unwrap_or(usize::MAX))
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| StashError::DeduplicationRead(e.to_string()))?
         {
-            let (k, v) = match item {
-                Ok((k, v)) => (k, v),
-                Err(e) => return Err(StashError::DeduplicationRead(e.to_string())),
-            };
-            let entry: Entry = match from_read(v.as_ref()) {
-                Ok(e) => e,
-                Err(e) => return Err(StashError::DeduplicationDecode(e.to_string())),
-            };
-            if entry.contents == buf {
-                self.db
-                    .remove(k)
-                    .map(|_| {
-                        deduped += 1;
-                    })
+            let id: u64 = row
+                .get(0)
+                .map_err(|e| StashError::DeduplicationDecode(e.to_string()))?;
+            let contents: Vec<u8> = row
+                .get(1)
+                .map_err(|e| StashError::DeduplicationDecode(e.to_string()))?;
+            if contents == buf {
+                self.conn
+                    .execute("DELETE FROM clipboard WHERE id = ?1", params![id])
                     .map_err(|e| StashError::DeduplicationRemove(e.to_string()))?;
-            }
-            count += 1;
-            if count >= max {
-                break;
+                deduped += 1;
             }
         }
         Ok(deduped)
     }
 
     fn trim_db(&self, max: u64) -> Result<(), StashError> {
-        let mut keys: Vec<_> = self
-            .db
-            .iter()
-            .rev()
-            .filter_map(|kv| match kv {
-                Ok((k, _)) => Some(k),
-                Err(_e) => None,
-            })
-            .collect();
-        if keys.len() as u64 > max {
-            for k in keys.drain(usize::try_from(max).unwrap_or(0)..) {
-                self.db
-                    .remove(k)
-                    .map_err(|e| StashError::Trim(e.to_string()))?;
-            }
+        let count: u64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM clipboard", [], |row| row.get(0))
+            .map_err(|e| StashError::Trim(e.to_string()))?;
+        if count > max {
+            let to_delete = count - max;
+            self.conn.execute(
+                "DELETE FROM clipboard WHERE id IN (SELECT id FROM clipboard ORDER BY id ASC LIMIT ?1)",
+                params![i64::try_from(to_delete).unwrap_or(i64::MAX)],
+            ).map_err(|e| StashError::Trim(e.to_string()))?;
         }
         Ok(())
     }
 
     fn delete_last(&self) -> Result<(), StashError> {
-        if let Some((k, _)) = self.db.iter().next_back().and_then(Result::ok) {
-            self.db
-                .remove(k)
-                .map(|_| ())
-                .map_err(|e| StashError::DeleteLast(e.to_string()))
+        let id: Option<u64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM clipboard ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| StashError::DeleteLast(e.to_string()))?;
+        if let Some(id) = id {
+            self.conn
+                .execute("DELETE FROM clipboard WHERE id = ?1", params![id])
+                .map_err(|e| StashError::DeleteLast(e.to_string()))?;
+            Ok(())
         } else {
             Err(StashError::NoEntriesToDelete)
         }
     }
 
     fn wipe_db(&self) -> Result<(), StashError> {
-        self.db.clear().map_err(|e| StashError::Wipe(e.to_string()))
+        self.conn
+            .execute("DELETE FROM clipboard", [])
+            .map_err(|e| StashError::Wipe(e.to_string()))?;
+        Ok(())
     }
 
     fn list_entries(&self, mut out: impl Write, preview_width: u32) -> Result<usize, StashError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, contents, mime FROM clipboard ORDER BY id DESC")
+            .map_err(|e| StashError::ListDecode(e.to_string()))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| StashError::ListDecode(e.to_string()))?;
         let mut listed = 0;
-        for (k, v) in self.db.iter().rev().filter_map(Result::ok) {
-            let id = ivec_to_u64(&k);
-            let entry: Entry = match from_read(v.as_ref()) {
-                Ok(e) => e,
-                Err(e) => return Err(StashError::ListDecode(e.to_string())),
-            };
-            let preview = preview_entry(&entry.contents, entry.mime.as_deref(), preview_width);
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| StashError::ListDecode(e.to_string()))?
+        {
+            let id: u64 = row
+                .get(0)
+                .map_err(|e| StashError::ListDecode(e.to_string()))?;
+            let contents: Vec<u8> = row
+                .get(1)
+                .map_err(|e| StashError::ListDecode(e.to_string()))?;
+            let mime: Option<String> = row
+                .get(2)
+                .map_err(|e| StashError::ListDecode(e.to_string()))?;
+            let preview = preview_entry(&contents, mime.as_deref(), preview_width);
             if writeln!(out, "{id}\t{preview}").is_ok() {
                 listed += 1;
             }
@@ -226,38 +249,44 @@ impl ClipboardDb for SledClipboardDb {
             buf
         };
         let id = extract_id(&s).map_err(|e| StashError::DecodeExtractId(e.to_string()))?;
-        let v = self
-            .db
-            .get(u64_to_ivec(id))
-            .map_err(|e| StashError::DecodeGet(e.to_string()))?
-            .ok_or(StashError::DecodeNoEntry(id))?;
-        let entry: Entry =
-            from_read(v.as_ref()).map_err(|e| StashError::DecodeDecode(e.to_string()))?;
-
-        out.write_all(&entry.contents)
+        let (contents, _mime): (Vec<u8>, Option<String>) = self
+            .conn
+            .query_row(
+                "SELECT contents, mime FROM clipboard WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|e| StashError::DecodeGet(e.to_string()))?;
+        out.write_all(&contents)
             .map_err(|e| StashError::DecodeWrite(e.to_string()))?;
         info!("Decoded entry with id {id}");
         Ok(())
     }
 
     fn delete_query(&self, query: &str) -> Result<usize, StashError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, contents FROM clipboard")
+            .map_err(|e| StashError::QueryDelete(e.to_string()))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| StashError::QueryDelete(e.to_string()))?;
         let mut deleted = 0;
-        for (k, v) in self.db.iter().filter_map(Result::ok) {
-            let entry: Entry = match from_read(v.as_ref()) {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            if entry
-                .contents
-                .windows(query.len())
-                .any(|w| w == query.as_bytes())
-            {
-                self.db
-                    .remove(k)
-                    .map(|_| {
-                        deleted += 1;
-                    })
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| StashError::QueryDelete(e.to_string()))?
+        {
+            let id: u64 = row
+                .get(0)
+                .map_err(|e| StashError::QueryDelete(e.to_string()))?;
+            let contents: Vec<u8> = row
+                .get(1)
+                .map_err(|e| StashError::QueryDelete(e.to_string()))?;
+            if contents.windows(query.len()).any(|w| w == query.as_bytes()) {
+                self.conn
+                    .execute("DELETE FROM clipboard WHERE id = ?1", params![id])
                     .map_err(|e| StashError::QueryDelete(e.to_string()))?;
+                deleted += 1;
             }
         }
         Ok(deleted)
@@ -268,25 +297,24 @@ impl ClipboardDb for SledClipboardDb {
         let mut deleted = 0;
         for line in reader.lines().map_while(Result::ok) {
             if let Ok(id) = extract_id(&line) {
-                self.db
-                    .remove(u64_to_ivec(id))
-                    .map(|_| {
-                        deleted += 1;
-                    })
+                self.conn
+                    .execute("DELETE FROM clipboard WHERE id = ?1", params![id])
                     .map_err(|e| StashError::DeleteEntry(id, e.to_string()))?;
+                deleted += 1;
             }
         }
         Ok(deleted)
     }
 
     fn next_sequence(&self) -> u64 {
-        let last = self
-            .db
-            .iter()
-            .next_back()
-            .and_then(std::result::Result::ok)
-            .map(|(k, _)| ivec_to_u64(&k));
-        last.unwrap_or(0) + 1
+        match self
+            .conn
+            .query_row("SELECT MAX(id) FROM clipboard", [], |row| {
+                row.get::<_, Option<u64>>(0)
+            }) {
+            Ok(Some(max_id)) => max_id + 1,
+            Ok(None) | Err(_) => 1,
+        }
     }
 }
 
@@ -294,20 +322,6 @@ impl ClipboardDb for SledClipboardDb {
 pub fn extract_id(input: &str) -> Result<u64, &'static str> {
     let id_str = input.split('\t').next().unwrap_or("");
     id_str.parse().map_err(|_| "invalid id")
-}
-
-pub fn u64_to_ivec(v: u64) -> IVec {
-    IVec::from(&v.to_be_bytes()[..])
-}
-
-pub fn ivec_to_u64(v: &IVec) -> u64 {
-    let arr: [u8; 8] = if let Ok(arr) = v.as_ref().try_into() {
-        arr
-    } else {
-        error!("Failed to convert IVec to u64: invalid length");
-        return 0;
-    };
-    u64::from_be_bytes(arr)
 }
 
 pub fn detect_mime(data: &[u8]) -> Option<String> {
@@ -347,7 +361,13 @@ pub fn preview_entry(data: &[u8], mime: Option<&str>, width: u32) -> String {
                 );
             }
         } else if mime == "application/json" || mime.starts_with("text/") {
-            let s = str::from_utf8(data).unwrap_or("");
+            let s = match str::from_utf8(data) {
+                Ok(s) => s,
+                Err(e) => {
+                    error!("Failed to decode UTF-8 clipboard data: {e}");
+                    ""
+                }
+            };
             let s = s.trim().replace(|c: char| c.is_whitespace(), " ");
             return truncate(&s, width as usize, "…");
         }
@@ -366,7 +386,12 @@ pub fn truncate(s: &str, max: usize, ellip: &str) -> String {
 
 pub fn size_str(size: usize) -> String {
     let units = ["B", "KiB", "MiB"];
-    let mut fsize = f64::from(u32::try_from(size).unwrap_or(u32::MAX));
+    let mut fsize = if let Ok(val) = u32::try_from(size) {
+        f64::from(val)
+    } else {
+        error!("Clipboard entry size too large for display: {size}");
+        f64::from(u32::MAX)
+    };
     let mut i = 0;
     while fsize >= 1024.0 && i < units.len() - 1 {
         fsize /= 1024.0;

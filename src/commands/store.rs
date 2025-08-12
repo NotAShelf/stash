@@ -1,4 +1,4 @@
-use crate::db::{ClipboardDb, SledClipboardDb};
+use crate::db::{ClipboardDb, SqliteClipboardDb};
 
 use std::io::Read;
 
@@ -12,7 +12,7 @@ pub trait StoreCommand {
     ) -> Result<(), crate::db::StashError>;
 }
 
-impl StoreCommand for SledClipboardDb {
+impl StoreCommand for SqliteClipboardDb {
     fn store(
         &self,
         input: impl Read,
