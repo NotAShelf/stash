@@ -75,6 +75,16 @@ enum Command {
     },
 }
 
+fn report_error<T>(result: Result<T, impl std::fmt::Display>, context: &str) -> Option<T> {
+    match result {
+        Ok(val) => Some(val),
+        Err(e) => {
+            log::error!("{context}: {e}");
+            None
+        }
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
     env_logger::Builder::new()
@@ -98,61 +108,58 @@ fn main() {
     match cli.command {
         Some(Command::Store) => {
             let state = env::var("STASH_CLIPBOARD_STATE").ok();
-            if let Err(e) = db.store(io::stdin(), cli.max_dedupe_search, cli.max_items, state) {
-                log::error!("Failed to store entry: {e}");
-            }
+            report_error(
+                db.store(io::stdin(), cli.max_dedupe_search, cli.max_items, state),
+                "Failed to store entry",
+            );
         }
         Some(Command::List) => {
-            if let Err(e) = db.list(io::stdout(), cli.preview_width) {
-                log::error!("Failed to list entries: {e}");
-            }
+            report_error(
+                db.list(io::stdout(), cli.preview_width),
+                "Failed to list entries",
+            );
         }
         Some(Command::Decode { input }) => {
-            if let Err(e) = db.decode(io::stdin(), io::stdout(), input) {
-                log::error!("Failed to decode entry: {e}");
-            }
+            report_error(
+                db.decode(io::stdin(), io::stdout(), input),
+                "Failed to decode entry",
+            );
         }
         Some(Command::Delete { arg, r#type }) => match (arg, r#type.as_deref()) {
             (Some(s), Some("id")) => {
                 if let Ok(id) = s.parse::<u64>() {
                     use std::io::Cursor;
-                    if let Err(e) = db.delete(Cursor::new(format!("{id}\n"))) {
-                        log::error!("Failed to delete entry by id: {e}");
-                    }
+                    report_error(
+                        db.delete(Cursor::new(format!("{id}\n"))),
+                        "Failed to delete entry by id",
+                    );
                 } else {
                     log::error!("Argument is not a valid id");
                 }
             }
             (Some(s), Some("query")) => {
-                if let Err(e) = db.query_delete(&s) {
-                    log::error!("Failed to delete entry by query: {e}");
-                }
+                report_error(db.query_delete(&s), "Failed to delete entry by query");
             }
             (Some(s), None) => {
                 if let Ok(id) = s.parse::<u64>() {
                     use std::io::Cursor;
-                    if let Err(e) = db.delete(Cursor::new(format!("{id}\n"))) {
-                        log::error!("Failed to delete entry by id: {e}");
-                    }
+                    report_error(
+                        db.delete(Cursor::new(format!("{id}\n"))),
+                        "Failed to delete entry by id",
+                    );
                 } else {
-                    if let Err(e) = db.query_delete(&s) {
-                        log::error!("Failed to delete entry by query: {e}");
-                    }
+                    report_error(db.query_delete(&s), "Failed to delete entry by query");
                 }
             }
             (None, _) => {
-                if let Err(e) = db.delete(io::stdin()) {
-                    log::error!("Failed to delete entry from stdin: {e}");
-                }
+                report_error(db.delete(io::stdin()), "Failed to delete entry from stdin");
             }
             (_, Some(_)) => {
                 log::error!("Unknown type for --type. Use \"id\" or \"query\".");
             }
         },
         Some(Command::Wipe) => {
-            if let Err(e) = db.wipe() {
-                log::error!("Failed to wipe database: {e}");
-            }
+            report_error(db.wipe(), "Failed to wipe database");
         }
 
         Some(Command::Import { r#type }) => {
