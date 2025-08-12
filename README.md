@@ -7,7 +7,7 @@ line.
 ## Features
 
 - Stores clipboard entries with automatic MIME detection
-- Fast persistent storage using sled
+- Fast persistent storage using SQLite
 - List, search, decode, delete, and wipe clipboard history
 - Backwards compatible with Cliphist TSV format
   - Import clipboard history from TSV (e.g., from `cliphist list`)
@@ -42,13 +42,13 @@ stash decode --input "1234"
 ### Delete entries matching a query
 
 ```bash
-stash delete-query --query "some text"
+stash delete --type query --arg "some text"
 ```
 
 ### Delete multiple entries by ID (from a file or stdin)
 
 ```bash
-stash delete < ids.txt
+stash delete --type id < ids.txt
 ```
 
 ### Wipe all entries
@@ -56,6 +56,15 @@ stash delete < ids.txt
 ```bash
 stash wipe
 ```
+
+### Watch clipboard for changes and store automatically
+
+```bash
+stash watch
+```
+
+This runs a daemon that monitors the clipboard and stores new entries
+automatically.
 
 ### Options
 
@@ -79,7 +88,7 @@ must handle the migration yourself, with one simple command.
 
 ```bash
 $ cliphist list --db ~/.cache/cliphist/db | stash --import-tsv
-# > Imported 750 records from TSV into database.
+# > Imported 750 records from TSV into SQLite database.
 ```
 
 Alternatively, you may first export from Cliphist and _then_ import the
@@ -88,5 +97,5 @@ database.
 ```bash
 $ cliphist list --db ~/.cache/cliphist/db > cliphist.tsv
 $ stash --import-tsv < cliphist.tsv
-# > Imported 750 records from TSV into database.
+# > Imported 750 records from TSV into SQLite database.
 ```
