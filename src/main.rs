@@ -92,7 +92,7 @@ fn main() {
     match cli.command {
         Some(Command::Store) => {
             log::info!("Executing: Store");
-            let state = env::var("CLIPBOARD_STATE").ok();
+            let state = env::var("STASH_CLIPBOARD_STATE").ok();
             db.store(io::stdin(), cli.max_dedupe_search, cli.max_items, state);
         }
         Some(Command::List) => {

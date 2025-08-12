@@ -288,7 +288,9 @@ pub fn u64_to_ivec(v: u64) -> IVec {
 }
 
 pub fn ivec_to_u64(v: &IVec) -> u64 {
-    let arr: [u8; 8] = if let Ok(arr) = v.as_ref().try_into() { arr } else {
+    let arr: [u8; 8] = if let Ok(arr) = v.as_ref().try_into() {
+        arr
+    } else {
         error!("Failed to convert IVec to u64: invalid length");
         return 0;
     };
