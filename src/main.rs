@@ -5,6 +5,8 @@ use std::{
     process,
 };
 
+use clap::CommandFactory;
+
 use clap::{Parser, Subcommand};
 
 mod commands;
@@ -234,8 +236,11 @@ fn main() {
         Some(Command::Watch) => {
             run_daemon(&db, cli.max_dedupe_search, cli.max_items);
         }
-        _ => {
-            log::warn!("No subcommand provided");
+        None => {
+            if let Err(e) = Cli::command().print_help() {
+                eprintln!("Failed to print help: {e}");
+            }
+            println!();
         }
     }
 }
