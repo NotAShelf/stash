@@ -101,7 +101,22 @@ fn report_error<T>(result: Result<T, impl std::fmt::Display>, context: &str) -> 
 async fn run_daemon(db: &db::SqliteClipboardDb, max_dedupe_search: u64, max_items: u64) {
     log::info!("Starting clipboard watch daemon");
 
-    let mut last_contents: Option<Vec<u8>> = None;
+    // Initialize with current clipboard to avoid duplicating on startup
+    let mut last_contents: Option<Vec<u8>> = match get_contents(
+        ClipboardType::Regular,
+        Seat::Unspecified,
+        wl_clipboard_rs::paste::MimeType::Any,
+    ) {
+        Ok((mut reader, _)) => {
+            let mut buf = Vec::new();
+            if reader.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
+                Some(buf)
+            } else {
+                None
+            }
+        }
+        Err(_) => None,
+    };
 
     loop {
         match get_contents(
