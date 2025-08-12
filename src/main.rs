@@ -38,8 +38,8 @@ struct Cli {
     #[arg(long)]
     db_path: Option<PathBuf>,
 
-    #[arg(long)]
-    import_tsv: bool,
+    #[command(flatten)]
+    verbosity: clap_verbosity_flag::Verbosity,
 }
 
 #[derive(Subcommand)]
@@ -75,9 +75,22 @@ enum Command {
     },
 }
 
+fn report_error<T>(result: Result<T, impl std::fmt::Display>, context: &str) -> Option<T> {
+    match result {
+        Ok(val) => Some(val),
+        Err(e) => {
+            log::error!("{context}: {e}");
+            None
+        }
+    }
+}
+
 fn main() {
-    env_logger::init();
     let cli = Cli::parse();
+    env_logger::Builder::new()
+        .filter_level(cli.verbosity.into())
+        .init();
+
     let db_path = cli.db_path.unwrap_or_else(|| {
         dirs::cache_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp"))
@@ -89,63 +102,67 @@ fn main() {
         log::error!("Failed to open database: {e}");
         process::exit(1);
     });
-    let db = db::SledClipboardDb { db: sled_db };
 
-    if cli.import_tsv {
-        db.import_tsv(io::stdin());
-        return;
-    }
+    let db = db::SledClipboardDb { db: sled_db };
 
     match cli.command {
         Some(Command::Store) => {
-            log::info!("Executing: Store");
-            let state = env::var("CLIPBOARD_STATE").ok();
-            db.store(io::stdin(), cli.max_dedupe_search, cli.max_items, state);
+            let state = env::var("STASH_CLIPBOARD_STATE").ok();
+            report_error(
+                db.store(io::stdin(), cli.max_dedupe_search, cli.max_items, state),
+                "Failed to store entry",
+            );
         }
         Some(Command::List) => {
-            log::info!("Executing: List");
-            db.list(io::stdout(), cli.preview_width);
+            report_error(
+                db.list(io::stdout(), cli.preview_width),
+                "Failed to list entries",
+            );
         }
         Some(Command::Decode { input }) => {
-            log::info!("Executing: Decode");
-            db.decode(io::stdin(), io::stdout(), input);
+            report_error(
+                db.decode(io::stdin(), io::stdout(), input),
+                "Failed to decode entry",
+            );
         }
-        Some(Command::Delete { arg, r#type }) => {
-            log::info!("Executing: Delete");
-            match (arg, r#type.as_deref()) {
-                (Some(s), Some("id")) => {
-                    if let Ok(id) = s.parse::<u64>() {
-                        use std::io::Cursor;
-                        db.delete(Cursor::new(format!("{id}\n")));
-                    } else {
-                        log::error!("Argument is not a valid id");
-                    }
-                }
-                (Some(s), Some("query")) => {
-                    db.query_delete(&s);
-                }
-                (Some(s), None) => {
-                    if let Ok(id) = s.parse::<u64>() {
-                        use std::io::Cursor;
-                        db.delete(Cursor::new(format!("{id}\n")));
-                    } else {
-                        db.query_delete(&s);
-                    }
-                }
-                (None, _) => {
-                    db.delete(io::stdin());
-                }
-                (_, Some(_)) => {
-                    log::error!("Unknown type for --type. Use \"id\" or \"query\".");
+        Some(Command::Delete { arg, r#type }) => match (arg, r#type.as_deref()) {
+            (Some(s), Some("id")) => {
+                if let Ok(id) = s.parse::<u64>() {
+                    use std::io::Cursor;
+                    report_error(
+                        db.delete(Cursor::new(format!("{id}\n"))),
+                        "Failed to delete entry by id",
+                    );
+                } else {
+                    log::error!("Argument is not a valid id");
                 }
             }
-        }
+            (Some(s), Some("query")) => {
+                report_error(db.query_delete(&s), "Failed to delete entry by query");
+            }
+            (Some(s), None) => {
+                if let Ok(id) = s.parse::<u64>() {
+                    use std::io::Cursor;
+                    report_error(
+                        db.delete(Cursor::new(format!("{id}\n"))),
+                        "Failed to delete entry by id",
+                    );
+                } else {
+                    report_error(db.query_delete(&s), "Failed to delete entry by query");
+                }
+            }
+            (None, _) => {
+                report_error(db.delete(io::stdin()), "Failed to delete entry from stdin");
+            }
+            (_, Some(_)) => {
+                log::error!("Unknown type for --type. Use \"id\" or \"query\".");
+            }
+        },
         Some(Command::Wipe) => {
-            log::info!("Executing: Wipe");
-            db.wipe();
+            report_error(db.wipe(), "Failed to wipe database");
         }
+
         Some(Command::Import { r#type }) => {
-            log::info!("Executing: Import");
             // Default format is TSV (Cliphist compatible)
             let format = r#type.as_deref().unwrap_or("tsv");
             match format {
