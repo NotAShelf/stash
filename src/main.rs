@@ -37,6 +37,9 @@ struct Cli {
 
     #[arg(long)]
     db_path: Option<PathBuf>,
+
+    #[command(flatten)]
+    verbosity: clap_verbosity_flag::Verbosity,
 }
 
 #[derive(Subcommand)]
@@ -73,8 +76,11 @@ enum Command {
 }
 
 fn main() {
-    env_logger::init();
     let cli = Cli::parse();
+    env_logger::Builder::new()
+        .filter_level(cli.verbosity.into())
+        .init();
+
     let db_path = cli.db_path.unwrap_or_else(|| {
         dirs::cache_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp"))
