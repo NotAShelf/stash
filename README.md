@@ -75,27 +75,66 @@ commands `--help` text for more details. The following are generally standard:
 - `--max-items <N>`: Maximum number of entries to keep (oldest trimmed)
 - `--max-dedupe-search <N>`: Deduplication window size
 - `--preview-width <N>`: Text preview max width for `list`
+- `--version`: Print the current version and exit
 
 ## Tips & Tricks
 
 ### Migrating from Cliphist
 
-[Cliphist]: https://github.com/sentriz/cliphist
+Stash is designed to be a drop-in replacement for Cliphist, with only minor
+improvements. If you are migrating from Cliphist, here are a few things you
+should know.
 
-Stash is designed to be backwards compatible with [Cliphist]. Though for
-brevity, I have elected to skip automatic database migration. Which means you
-must handle the migration yourself, with one simple command.
+- Most Cliphist commands have direct equivalents in Stash. For example,
+  `cliphist store` -> `stash store`, `cliphist list` -> `stash list`, etc.
+- Cliphist uses `delete-query`; in Stash, you must use
+  `stash delete --type query --arg "your query"`.
+- Both Cliphist and Stash support deleting by ID, including from stdin or a
+  file.
+- Stash respects the `STASH_CLIPBOARD_STATE` environment variable for
+  sensitive/clear entries, just like Cliphist. The `STASH_` prefix is added for
+  granularity, you must update your scripts.
+- You can export your Cliphist history to TSV and import it into Stash (see
+  below).
+- Stash supports text and image previews, including dimensions and format.
+- Stash adds a `watch` command to automatically store clipboard changes. This is
+  an alternative to `wl-paste --watch cliphist list`. You can avoid shelling out
+  and depending on `wl-paste` as Stash implements it through `wl-clipboard-rs`
+  crate.
+
+### TSV Export and Import
+
+Both Stash and Cliphist support TSV format for clipboard history. You can export
+from Cliphist and import into Stash, or use Stash to export TSV for
+interoperability.
+
+**Export TSV from Cliphist:**
 
 ```bash
-$ cliphist list --db ~/.cache/cliphist/db | stash --import-tsv
-# > Imported 750 records from TSV into SQLite database.
+cliphist list --db ~/.cache/cliphist/db > cliphist.tsv
 ```
 
-Alternatively, you may first export from Cliphist and _then_ import the
-database.
+**Import TSV into Stash:**
 
 ```bash
-$ cliphist list --db ~/.cache/cliphist/db > cliphist.tsv
-$ stash --import-tsv < cliphist.tsv
-# > Imported 750 records from TSV into SQLite database.
+stash --import < cliphist.tsv
 ```
+
+**Export TSV from Stash:**
+
+```bash
+stash list > stash.tsv
+```
+
+**Import TSV into Cliphist:**
+
+```bash
+cliphist --import < stash.tsv
+```
+
+### More Tricks
+
+- Use `stash list` to export your clipboard history in TSV format. This displays
+  your clipboard in the same format as `cliphist list`
+- Use `stash import --type tsv` to import TSV clipboard history from Cliphist or
+  other tools.
