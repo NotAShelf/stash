@@ -6,6 +6,7 @@ use std::{
 };
 
 use clap::{CommandFactory, Parser, Subcommand};
+use inquire::Confirm;
 
 mod commands;
 mod db;
@@ -39,6 +40,10 @@ struct Cli {
     #[arg(long)]
     db_path: Option<PathBuf>,
 
+    /// Ask for confirmation before destructive operations
+    #[arg(long)]
+    ask: bool,
+
     #[command(flatten)]
     verbosity: clap_verbosity_flag::Verbosity,
 }
@@ -67,16 +72,28 @@ enum Command {
         /// Explicitly specify type: "id" or "query"
         #[arg(long, value_parser = ["id", "query"])]
         r#type: Option<String>,
+
+        /// Ask for confirmation before deleting
+        #[arg(long)]
+        ask: bool,
     },
 
     /// Wipe all clipboard history
-    Wipe,
+    Wipe {
+        /// Ask for confirmation before wiping
+        #[arg(long)]
+        ask: bool,
+    },
 
     /// Import clipboard data from stdin (default: TSV format)
     Import {
         /// Explicitly specify format: "tsv" (default)
         #[arg(long, value_parser = ["tsv"])]
         r#type: Option<String>,
+
+        /// Ask for confirmation before importing
+        #[arg(long)]
+        ask: bool,
     },
 
     /// Watch clipboard for changes and store automatically
@@ -144,17 +161,16 @@ fn main() {
                             "Failed to list entries",
                         );
                     }
-                    "json" => {
-                        // Implement JSON output
-                        match db.list_json() {
-                            Ok(json) => {
-                                println!("{json}");
-                            }
-                            Err(e) => {
-                                log::error!("Failed to list entries as JSON: {e}");
-                            }
+
+                    "json" => match db.list_json() {
+                        Ok(json) => {
+                            println!("{json}");
                         }
-                    }
+                        Err(e) => {
+                            log::error!("Failed to list entries as JSON: {e}");
+                        }
+                    },
+
                     _ => {
                         log::error!("Unsupported format: {format}");
                     }
@@ -166,52 +182,98 @@ fn main() {
                     "Failed to decode entry",
                 );
             }
-            Some(Command::Delete { arg, r#type }) => match (arg, r#type.as_deref()) {
-                (Some(s), Some("id")) => {
-                    if let Ok(id) = s.parse::<u64>() {
-                        use std::io::Cursor;
-                        report_error(
-                            db.delete(Cursor::new(format!("{id}\n"))),
-                            "Failed to delete entry by id",
-                        );
-                    } else {
-                        log::error!("Argument is not a valid id");
+            Some(Command::Delete { arg, r#type, ask }) => {
+                let mut should_proceed = true;
+                if ask {
+                    should_proceed =
+                        Confirm::new("Are you sure you want to delete clipboard entries?")
+                            .with_default(false)
+                            .prompt()
+                            .unwrap_or(false);
+
+                    if !should_proceed {
+                        log::info!("Aborted by user.");
                     }
                 }
-                (Some(s), Some("query")) => {
-                    report_error(db.query_delete(&s), "Failed to delete entry by query");
-                }
-                (Some(s), None) => {
-                    if let Ok(id) = s.parse::<u64>() {
-                        use std::io::Cursor;
-                        report_error(
-                            db.delete(Cursor::new(format!("{id}\n"))),
-                            "Failed to delete entry by id",
-                        );
-                    } else {
-                        report_error(db.query_delete(&s), "Failed to delete entry by query");
+                if should_proceed {
+                    match (arg, r#type.as_deref()) {
+                        (Some(s), Some("id")) => {
+                            if let Ok(id) = s.parse::<u64>() {
+                                use std::io::Cursor;
+                                report_error(
+                                    db.delete(Cursor::new(format!("{id}\n"))),
+                                    "Failed to delete entry by id",
+                                );
+                            } else {
+                                log::error!("Argument is not a valid id");
+                            }
+                        }
+                        (Some(s), Some("query")) => {
+                            report_error(db.query_delete(&s), "Failed to delete entry by query");
+                        }
+                        (Some(s), None) => {
+                            if let Ok(id) = s.parse::<u64>() {
+                                use std::io::Cursor;
+                                report_error(
+                                    db.delete(Cursor::new(format!("{id}\n"))),
+                                    "Failed to delete entry by id",
+                                );
+                            } else {
+                                report_error(
+                                    db.query_delete(&s),
+                                    "Failed to delete entry by query",
+                                );
+                            }
+                        }
+                        (None, _) => {
+                            report_error(
+                                db.delete(io::stdin()),
+                                "Failed to delete entry from stdin",
+                            );
+                        }
+                        (_, Some(_)) => {
+                            log::error!("Unknown type for --type. Use \"id\" or \"query\".");
+                        }
                     }
                 }
-                (None, _) => {
-                    report_error(db.delete(io::stdin()), "Failed to delete entry from stdin");
+            }
+            Some(Command::Wipe { ask }) => {
+                let mut should_proceed = true;
+                if ask {
+                    should_proceed =
+                        Confirm::new("Are you sure you want to wipe all clipboard history?")
+                            .with_default(false)
+                            .prompt()
+                            .unwrap_or(false);
+                    if !should_proceed {
+                        log::info!("Aborted by user.");
+                    }
                 }
-                (_, Some(_)) => {
-                    log::error!("Unknown type for --type. Use \"id\" or \"query\".");
+                if should_proceed {
+                    report_error(db.wipe(), "Failed to wipe database");
                 }
-            },
-            Some(Command::Wipe) => {
-                report_error(db.wipe(), "Failed to wipe database");
             }
 
-            Some(Command::Import { r#type }) => {
-                // Default format is TSV (Cliphist compatible)
-                let format = r#type.as_deref().unwrap_or("tsv");
-                match format {
-                    "tsv" => {
-                        db.import_tsv(io::stdin());
+            Some(Command::Import { r#type, ask }) => {
+                let mut should_proceed = true;
+                if ask {
+                    should_proceed = Confirm::new("Are you sure you want to import clipboard data? This may overwrite existing entries.")
+                        .with_default(false)
+                        .prompt()
+                        .unwrap_or(false);
+                    if !should_proceed {
+                        log::info!("Aborted by user.");
                     }
-                    _ => {
-                        log::error!("Unsupported import format: {format}");
+                }
+                if should_proceed {
+                    let format = r#type.as_deref().unwrap_or("tsv");
+                    match format {
+                        "tsv" => {
+                            db.import_tsv(io::stdin());
+                        }
+                        _ => {
+                            log::error!("Unsupported import format: {format}");
+                        }
                     }
                 }
             }
@@ -220,7 +282,7 @@ fn main() {
             }
             None => {
                 if let Err(e) = Cli::command().print_help() {
-                    eprintln!("Failed to print help: {e}");
+                    log::error!("Failed to print help: {e}");
                 }
                 println!();
             }
