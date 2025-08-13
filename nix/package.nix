@@ -4,7 +4,7 @@
 }:
 rustPlatform.buildRustPackage (finalAttrs: {
   pname = "stash";
-  version = "0.1.0";
+  version = (builtins.fromTOML (builtins.readFile ../Cargo.toml)).package.version;
 
   src = let
     fs = lib.fileset;
