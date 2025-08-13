@@ -148,15 +148,15 @@ fn main() {
                         // Implement JSON output
                         match db.list_json() {
                             Ok(json) => {
-                                println!("{}", json);
+                                println!("{json}");
                             }
                             Err(e) => {
-                                log::error!("Failed to list entries as JSON: {}", e);
+                                log::error!("Failed to list entries as JSON: {e}");
                             }
                         }
                     }
                     _ => {
-                        log::error!("Unsupported format: {}", format);
+                        log::error!("Unsupported format: {format}");
                     }
                 }
             }

@@ -145,8 +145,7 @@ impl SqliteClipboardDb {
             }));
         }
 
-        Ok(serde_json::to_string_pretty(&entries)
-            .map_err(|e| StashError::ListDecode(e.to_string()))?)
+        serde_json::to_string_pretty(&entries).map_err(|e| StashError::ListDecode(e.to_string()))
     }
 }
 
