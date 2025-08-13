@@ -107,6 +107,13 @@ fn main() {
                 .join("db")
         });
 
+        if let Some(parent) = db_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                log::error!("Failed to create database directory: {e}");
+                process::exit(1);
+            }
+        }
+
         let conn = rusqlite::Connection::open(&db_path).unwrap_or_else(|e| {
             log::error!("Failed to open SQLite database: {e}");
             process::exit(1);
