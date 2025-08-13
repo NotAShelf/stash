@@ -2,6 +2,7 @@
   mkShell,
   rust-analyzer,
   rustfmt,
+  rustc,
   clippy,
   cargo,
   rustPlatform,
@@ -13,6 +14,7 @@ mkShell {
     rustfmt
     clippy
     cargo
+    rustc
   ];
 
   RUST_SRC_PATH = "${rustPlatform.rustLibSrc}";
