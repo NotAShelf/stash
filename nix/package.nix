@@ -1,11 +1,12 @@
 {
   lib,
-  rustPlatform,
-}:
-rustPlatform.buildRustPackage (finalAttrs: {
+  craneLib,
+  runCommandNoCCLocal,
+}: let
+  inherit (craneLib) buildDepsOnly buildPackage mkDummySrc;
+
   pname = "stash";
   version = (builtins.fromTOML (builtins.readFile ../Cargo.toml)).package.version;
-
   src = let
     fs = lib.fileset;
     s = ../.;
@@ -19,18 +20,44 @@ rustPlatform.buildRustPackage (finalAttrs: {
       ];
     };
 
-  cargoLock.lockFile = "${finalAttrs.src}/Cargo.lock";
-  enableParallelBuilding = true;
+  # basically avoid crane rebuilding everything
+  # when the package version changes
+  replacedSrc = let
+    rgxIn = ''
+      name = "${pname}"
+      version = "${version}"
+    '';
+    rgxOut = ''
+      name = "${pname}"
+      version = "0.9.6"
+    '';
+  in
+    runCommandNoCCLocal "bakaSrc" {} ''
+      cp -r ${src} $out
+      substituteInPlace $out/Cargo.toml \
+         --replace-fail '${rgxIn}' '${rgxOut}'
+      substituteInPlace $out/Cargo.lock \
+         --replace-fail '${rgxIn}' '${rgxOut}'
+    '';
 
-  postInstall = ''
-    mkdir -p $out
-    install -Dm755 ${../vendor/stash.service} $out/share/stash.service
-  '';
-
-  meta = {
-    description = "Wayland clipboard manager with fast persistent history and multi-media support";
-    maintainers = [lib.maintainers.NotAShelf];
-    license = lib.licenses.mpl20;
-    mainProgram = "stash";
+  cargoArtifacts = buildDepsOnly {
+    name = "${pname}-deps";
+    strictDeps = true;
+    dummySrc = mkDummySrc {src = replacedSrc;};
   };
-})
+in
+  buildPackage {
+    inherit cargoArtifacts pname src version;
+    strictDeps = true;
+    postInstall = ''
+      mkdir -p $out
+      install -Dm755 ${../vendor/stash.service} $out/share/stash.service
+    '';
+
+    meta = {
+      description = "Wayland clipboard manager with fast persistent history and multi-media support";
+      maintainers = [lib.maintainers.NotAShelf];
+      license = lib.licenses.mpl20;
+      mainProgram = "stash";
+    };
+  }
