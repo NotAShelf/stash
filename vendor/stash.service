@@ -6,7 +6,7 @@ Requisite=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=wl-paste --watch stash store
+ExecStart=stash watch
 Restart=on-failure
 
 [Install]
