@@ -4,6 +4,18 @@ Wayland clipboard "manager" with fast persistent history and multi-media
 support. Stores and previews clipboard entries (text, images) on the command
 line.
 
+## Features
+
+- Stores clipboard entries with automatic MIME detection
+- Fast persistent storage using SQLite
+- List, search, decode, delete, and wipe clipboard history
+- Backwards compatible with Cliphist TSV format
+  - Import clipboard history from TSV (e.g., from `cliphist list`)
+- Image preview (shows dimensions and format)
+- Deduplication and entry limit control
+- Text previews with customizable width
+- Sensitive clipboard filtering via regex (see below)
+
 ## Installation
 
 ### With Nix
@@ -59,22 +71,17 @@ releases are made when a version gets tagged, and are available under
   cargo install --git https://github.com/notashelf/stash
   ```
 
-## Features
-
-- Stores clipboard entries with automatic MIME detection
-- Fast persistent storage using SQLite
-- List, search, decode, delete, and wipe clipboard history
-- Backwards compatible with Cliphist TSV format
-  - Import clipboard history from TSV (e.g., from `cliphist list`)
-- Image preview (shows dimensions and format)
-- Deduplication and entry limit control
-- Text previews with customizable width
-
 ## Usage
 
 Command interface is only slightly different from Cliphist. In most cases, it
 will be as simple as replacing `cliphist` with `stash` in your commands, aliases
 or scripts.
+
+> [!NOTE]
+> It is not a priority to provide 1:1 backwards compatibility with Cliphist.
+> While the interface is _almost_ identical, Stash chooses to build upon
+> Cliphist's design and extend existing design choices. See
+> [Migrating from Cliphist](#migrating-from-cliphist) for more details.
 
 ### Store an entry
 
@@ -132,11 +139,41 @@ commands `--help` text for more details. The following are generally standard:
 - `--preview-width <N>`: Text preview max width for `list`
 - `--version`: Print the current version and exit
 
+#### Sensitive Clipboard Filtering
+
+Stash can be configured to avoid storing clipboard entries that match a
+sensitive pattern, using a regular expression. This is useful for preventing
+accidental storage of secrets, passwords, or other sensitive data. You don't
+want sensitive data ending up in your persistent clipboard, right?
+
+The filter can be configured in one of two ways:
+
+- **Environment variable**: Set `STASH_SENSITIVE_REGEX` to a valid regex
+  pattern. If clipboard text matches, it will not be stored.
+- **Systemd LoadCredential**: If running as a service, you can provide a regex
+  pattern via a credential file. For example, add to your `stash.service`:
+
+  ```ini
+  LoadCredential=clipboard_filter:/etc/stash/clipboard_filter
+  ```
+
+  The file `/etc/stash/clipboard_filter` should contain your regex pattern (no
+  quotes). This is done automatically in the vendored Systemd service. Remember
+  to set the appropriate file permissions if using this option.
+
+The service will check the credential file first, then the environment variable.
+If a clipboard entry matches the regex, it will be skipped and a warning will be
+logged.
+
+**Example regex to block common password patterns**:
+
+- `(password|secret|api[_-]?key|token)[=: ]+[^\s]+`
+
 ## Tips & Tricks
 
 ### Migrating from Cliphist
 
-Stash is designed to be a drop-in replacement for Cliphist, with only minor
+Stash was designed to be a drop-in replacement for Cliphist, with only minor
 improvements. If you are migrating from Cliphist, here are a few things you
 should know.
 
