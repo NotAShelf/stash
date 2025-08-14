@@ -12,27 +12,30 @@ impl ImportCommand for SqliteClipboardDb {
         let mut imported = 0;
         for line in reader.lines().map_while(Result::ok) {
             let mut parts = line.splitn(2, '\t');
-            if let (Some(id_str), Some(val)) = (parts.next(), parts.next()) {
-                if let Ok(_id) = id_str.parse::<u64>() {
-                    let entry = Entry {
-                        contents: val.as_bytes().to_vec(),
-                        mime: detect_mime(val.as_bytes()),
-                    };
-                    match self.conn.execute(
-                        "INSERT INTO clipboard (contents, mime) VALUES (?1, ?2)",
-                        rusqlite::params![entry.contents, entry.mime],
-                    ) {
-                        Ok(_) => {
-                            imported += 1;
-                            info!("Imported entry from TSV");
-                        }
-                        Err(e) => error!("Failed to insert entry: {e}"),
-                    }
-                } else {
-                    error!("Failed to parse id from line: {id_str}");
-                }
-            } else {
+            let (Some(id_str), Some(val)) = (parts.next(), parts.next()) else {
                 error!("Malformed TSV line: {line:?}");
+                continue;
+            };
+
+            let Ok(_id) = id_str.parse::<u64>() else {
+                error!("Failed to parse id from line: {id_str}");
+                continue;
+            };
+
+            let entry = Entry {
+                contents: val.as_bytes().to_vec(),
+                mime: detect_mime(val.as_bytes()),
+            };
+
+            match self.conn.execute(
+                "INSERT INTO clipboard (contents, mime) VALUES (?1, ?2)",
+                rusqlite::params![entry.contents, entry.mime],
+            ) {
+                Ok(_) => {
+                    imported += 1;
+                    info!("Imported entry from TSV");
+                }
+                Err(e) => error!("Failed to insert entry: {e}"),
             }
         }
         info!("Imported {imported} records from TSV into SQLite database.");
