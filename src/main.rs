@@ -5,6 +5,8 @@ use std::{
     process,
 };
 
+use atty::Stream;
+
 use clap::{CommandFactory, Parser, Subcommand};
 use inquire::Confirm;
 
@@ -153,30 +155,38 @@ fn main() {
                     "Failed to store entry",
                 );
             }
-            Some(Command::List { format }) => {
-                let format = format.as_deref().unwrap_or("tsv");
-                match format {
-                    "tsv" => {
+            Some(Command::List { format }) => match format.as_deref() {
+                Some("tsv") => {
+                    report_error(
+                        db.list(io::stdout(), cli.preview_width),
+                        "Failed to list entries",
+                    );
+                }
+                Some("json") => match db.list_json() {
+                    Ok(json) => {
+                        println!("{json}");
+                    }
+                    Err(e) => {
+                        log::error!("Failed to list entries as JSON: {e}");
+                    }
+                },
+                Some(other) => {
+                    log::error!("Unsupported format: {other}");
+                }
+                None => {
+                    if atty::is(Stream::Stdout) {
+                        report_error(
+                            db.list_tui(cli.preview_width),
+                            "Failed to list entries in TUI",
+                        );
+                    } else {
                         report_error(
                             db.list(io::stdout(), cli.preview_width),
                             "Failed to list entries",
                         );
                     }
-
-                    "json" => match db.list_json() {
-                        Ok(json) => {
-                            println!("{json}");
-                        }
-                        Err(e) => {
-                            log::error!("Failed to list entries as JSON: {e}");
-                        }
-                    },
-
-                    _ => {
-                        log::error!("Unsupported format: {format}");
-                    }
                 }
-            }
+            },
             Some(Command::Decode { input }) => {
                 report_error(
                     db.decode(io::stdin(), io::stdout(), input),
