@@ -209,7 +209,7 @@ cliphist list --db ~/.cache/cliphist/db > cliphist.tsv
 **Import TSV into Stash:**
 
 ```bash
-stash --import < cliphist.tsv
+stash import < cliphist.tsv
 ```
 
 **Export TSV from Stash:**
