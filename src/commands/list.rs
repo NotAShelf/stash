@@ -1,6 +1,7 @@
 use std::io::Write;
 
 use crate::db::{ClipboardDb, SqliteClipboardDb, StashError};
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 pub trait ListCommand {
@@ -44,13 +45,7 @@ impl SqliteClipboardDb {
             .query([])
             .map_err(|e| StashError::ListDecode(e.to_string()))?;
 
-        struct EntryRow {
-            id: u64,
-            preview: String,
-            mime: String,
-        }
-
-        let mut entries: Vec<EntryRow> = Vec::new();
+        let mut entries: Vec<(u64, String, String)> = Vec::new();
         let mut max_id_width = 2;
         let mut max_mime_width = 8;
         while let Some(row) = rows
@@ -71,11 +66,7 @@ impl SqliteClipboardDb {
             let id_str = id.to_string();
             max_id_width = max_id_width.max(id_str.width());
             max_mime_width = max_mime_width.max(mime_str.width());
-            entries.push(EntryRow {
-                id,
-                preview,
-                mime: mime_str,
-            });
+            entries.push((id, preview, mime_str));
         }
 
         enable_raw_mode().map_err(|e| StashError::ListDecode(e.to_string()))?;
@@ -99,9 +90,6 @@ impl SqliteClipboardDb {
                         let block = Block::default()
                             .title("Clipboard Entries (j/k/↑/↓ to move, q/ESC to quit)")
                             .borders(Borders::ALL);
-
-                        use unicode_segmentation::UnicodeSegmentation;
-                        use unicode_width::UnicodeWidthStr;
 
                         let border_width = 2;
                         let highlight_symbol = ">";
@@ -155,7 +143,7 @@ impl SqliteClipboardDb {
                                 // Truncate preview by grapheme clusters and display width
                                 let mut preview = String::new();
                                 let mut width = 0;
-                                for g in entry.preview.graphemes(true) {
+                                for g in entry.1.graphemes(true) {
                                     let g_width = UnicodeWidthStr::width(g);
                                     if width + g_width > preview_col {
                                         preview.push('…');
@@ -167,7 +155,7 @@ impl SqliteClipboardDb {
                                 // Truncate and pad mimetype
                                 let mut mime = String::new();
                                 let mut mwidth = 0;
-                                for g in entry.mime.graphemes(true) {
+                                for g in entry.2.graphemes(true) {
                                     let g_width = UnicodeWidthStr::width(g);
                                     if mwidth + g_width > mime_col {
                                         mime.push('…');
@@ -177,11 +165,9 @@ impl SqliteClipboardDb {
                                     mwidth += g_width;
                                 }
 
-                                let preview_str = format!("{preview:<preview_col$}");
-                                let mime_str = format!("{mime:>mime_col$}");
-
                                 // Compose the row as highlight + id + space + preview + space + mimetype
                                 let mut spans = Vec::new();
+                                let (id, preview, mime) = entry;
                                 if Some(i) == selected {
                                     spans.push(Span::styled(
                                         highlight_symbol,
@@ -190,34 +176,30 @@ impl SqliteClipboardDb {
                                             .add_modifier(Modifier::BOLD),
                                     ));
                                     spans.push(Span::styled(
-                                        format!("{:>width$}", entry.id, width = id_col),
+                                        format!("{id:>id_col$}"),
                                         Style::default()
                                             .fg(Color::Yellow)
                                             .add_modifier(Modifier::BOLD),
                                     ));
                                     spans.push(Span::raw(" "));
                                     spans.push(Span::styled(
-                                        preview_str,
+                                        format!("{preview:<preview_col$}"),
                                         Style::default()
                                             .fg(Color::Yellow)
                                             .add_modifier(Modifier::BOLD),
                                     ));
                                     spans.push(Span::raw(" "));
                                     spans.push(Span::styled(
-                                        mime_str,
+                                        format!("{mime:>mime_col$}"),
                                         Style::default().fg(Color::Green),
                                     ));
                                 } else {
                                     spans.push(Span::raw(" "));
-                                    spans.push(Span::raw(format!(
-                                        "{:>width$}",
-                                        entry.id,
-                                        width = id_col
-                                    )));
+                                    spans.push(Span::raw(format!("{id:>id_col$}")));
                                     spans.push(Span::raw(" "));
-                                    spans.push(Span::raw(preview_str));
+                                    spans.push(Span::raw(format!("{preview:<preview_col$}")));
                                     spans.push(Span::raw(" "));
-                                    spans.push(Span::raw(mime_str));
+                                    spans.push(Span::raw(format!("{mime:>mime_col$}")));
                                 }
                                 ListItem::new(Line::from(spans))
                             })
