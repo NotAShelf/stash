@@ -1115,6 +1115,7 @@ dependencies = [
  "imagesize",
  "inquire",
  "log",
+ "regex",
  "rmp-serde",
  "rusqlite",
  "serde",
