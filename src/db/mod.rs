@@ -1,9 +1,12 @@
+use std::env;
 use std::fmt;
+use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::str;
 
 use imagesize::{ImageSize, ImageType};
-use log::{error, info};
+use log::{error, info, warn};
+use regex::Regex;
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -175,6 +178,18 @@ impl ClipboardDb for SqliteClipboardDb {
             }
             other => other,
         };
+
+        // Try to load regex from systemd credential file, then env var
+        let regex = load_sensitive_regex();
+        if let Some(re) = regex {
+            // Only check text data
+            if let Ok(s) = std::str::from_utf8(&buf) {
+                if re.is_match(s) {
+                    warn!("Clipboard entry matches sensitive regex, skipping store.");
+                    return Err(StashError::Store("Filtered by sensitive regex".to_string()));
+                }
+            }
+        }
 
         self.deduplicate(&buf, max_dedupe_search)?;
 
@@ -375,6 +390,31 @@ impl ClipboardDb for SqliteClipboardDb {
 }
 
 // Helper functions
+
+/// Try to load a sensitive regex from systemd credential or env.
+///
+/// # Returns
+///  `Some(Regex)` if present and valid, `None` otherwise.
+fn load_sensitive_regex() -> Option<Regex> {
+    if let Ok(regex_path) = env::var("CREDENTIALS_DIRECTORY") {
+        let file = format!("{regex_path}/clipboard_filter");
+        if let Ok(contents) = fs::read_to_string(&file) {
+            if let Ok(re) = Regex::new(contents.trim()) {
+                return Some(re);
+            }
+        }
+    }
+
+    // Fallback to an environment variable
+    if let Ok(pattern) = env::var("STASH_SENSITIVE_REGEX") {
+        if let Ok(re) = Regex::new(&pattern) {
+            return Some(re);
+        }
+    }
+
+    None
+}
+
 pub fn extract_id(input: &str) -> Result<u64, &'static str> {
     let id_str = input.split('\t').next().unwrap_or("");
     id_str.parse().map_err(|_| "invalid id")

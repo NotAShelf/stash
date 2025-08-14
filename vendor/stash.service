@@ -8,6 +8,7 @@ Requisite=graphical-session.target
 Type=simple
 ExecStart=stash watch
 Restart=on-failure
+LoadCredential=clipboard_filter:/etc/stash/clipboard_filter
 
 [Install]
 WantedBy=graphical-session.target
