@@ -4,6 +4,61 @@ Wayland clipboard "manager" with fast persistent history and multi-media
 support. Stores and previews clipboard entries (text, images) on the command
 line.
 
+## Installation
+
+### With Nix
+
+Nix is the recommended way of downloading Stash. You can install it using Nix
+flakes using `nix profile add` if on non-nixos or add Stash as a flake input if
+you are on NixOS.
+
+```nix
+{
+  # Add Stash to your inputs like so
+  inputs.stash.url = "github:notashelf/stash";
+
+  outputs = { /* ... */ };
+}
+```
+
+Then you can get the package from your flake input, and add it to your packages
+to make `stash` available in your system.
+
+```nix
+{inputs, pkgs, ...}: let
+  stashPkg = inputs.stash.packages.${pkgs.stdenv.hostPlatform}.stash;
+in {
+  environment.systemPackages = [stashPkg];
+
+  # Additionally feel free to add the Stash package in `systemd.packages` to
+  # automatically run the Stash watch daemon, which will watch your primary
+  # clipboard for changes and persist them.
+  systemd.packages = [stashPkg];
+}
+```
+
+You can also run it one time with `nix run`
+
+```sh
+nix run github:notashelf/stash -- watch # start the watch daemon
+```
+
+### Without Nix
+
+[GitHub Releases]: https://github.com/notashelf/stash/releases
+
+You can also install Stash on any of your systems _without_ using Nix. New
+releases are made when a version gets tagged, and are available under
+[GitHub Releases]. To install Stash on your system without Nix, eiter:
+
+- Download a tagged release from [GitHub Releases] for your platform and place
+  the binary in your `$PATH`.
+- Build from source with Rust:
+
+  ```bash
+  cargo install --git https://github.com/notashelf/stash
+  ```
+
 ## Features
 
 - Stores clipboard entries with automatic MIME detection
