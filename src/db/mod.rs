@@ -397,7 +397,7 @@ impl ClipboardDb for SqliteClipboardDb {
 ///  `Some(Regex)` if present and valid, `None` otherwise.
 fn load_sensitive_regex() -> Option<Regex> {
     if let Ok(regex_path) = env::var("CREDENTIALS_DIRECTORY") {
-        let file = format!("{}/clipboard_filter", regex_path);
+        let file = format!("{regex_path}/clipboard_filter");
         if let Ok(contents) = fs::read_to_string(&file) {
             if let Ok(re) = Regex::new(contents.trim()) {
                 return Some(re);

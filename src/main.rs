@@ -110,6 +110,7 @@ fn report_error<T>(result: Result<T, impl std::fmt::Display>, context: &str) -> 
     }
 }
 
+#[allow(clippy::too_many_lines)] // whatever
 fn main() {
     smol::block_on(async {
         let cli = Cli::parse();
