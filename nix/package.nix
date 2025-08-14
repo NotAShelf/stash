@@ -1,9 +1,8 @@
 {
   lib,
   craneLib,
-  runCommandNoCCLocal,
 }: let
-  inherit (craneLib) buildDepsOnly buildPackage mkDummySrc;
+  inherit (craneLib) buildDepsOnly buildPackage;
 
   pname = "stash";
   version = (builtins.fromTOML (builtins.readFile ../Cargo.toml)).package.version;
@@ -20,30 +19,10 @@
       ];
     };
 
-  # basically avoid crane rebuilding everything
-  # when the package version changes
-  replacedSrc = let
-    rgxIn = ''
-      name = "${pname}"
-      version = "${version}"
-    '';
-    rgxOut = ''
-      name = "${pname}"
-      version = "0.9.6"
-    '';
-  in
-    runCommandNoCCLocal "bakaSrc" {} ''
-      cp -r ${src} $out
-      substituteInPlace $out/Cargo.toml \
-         --replace-fail '${rgxIn}' '${rgxOut}'
-      substituteInPlace $out/Cargo.lock \
-         --replace-fail '${rgxIn}' '${rgxOut}'
-    '';
-
   cargoArtifacts = buildDepsOnly {
     name = "${pname}-deps";
     strictDeps = true;
-    dummySrc = mkDummySrc {src = replacedSrc;};
+    inherit src;
   };
 in
   buildPackage {
