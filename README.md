@@ -1,20 +1,55 @@
-# Stash
+<!-- markdownlint-disable MD033 -->
 
-Wayland clipboard "manager" with fast persistent history and multi-media
-support. Stores and previews clipboard entries (text, images) on the command
-line.
+<h1 id="header" align="center">
+    <pre>Stash</pre>
+</h1>
+
+<div align="center">
+    <a alt="CI" href="https://github.com/NotAShelf/stash/actions">
+        <img
+          src="https://github.com/NotAShelf/stash/actions/workflows/rust.yml/badge.svg"
+          alt="Build Status"
+        />
+    </a>
+    <a alt="Dopendencies" href="https://deps.rs/repo/github/notashelf/stash">
+        <img
+          src="https://deps.rs/repo/github/notashelf/stash/status.svg"
+          alt="Dependency Status"
+        />
+    </a>
+</div>
+
+<div align="center">
+  Wayland clipboard "manager" with fast persistent history and multi-media
+  support. Stores and previews clipboard entries (text, images) on the command
+  line.
+</div>
+
+<div align="center">
+  <br/>
+  <a href="#features">Features</a><br/>
+  <a href="#installation">Installation</a> | <a href="#usage">Usage</a><br/>
+  <a href="#tips--tricks">Tips and Tricks</a>
+  <br/>
+</div>
 
 ## Features
 
-- Stores clipboard entries with automatic MIME detection
+Stash is a feature-rich, yet simple clipboard management utility with many
+features such as but not limited to:
+
+- Automatic MIME detection for stored entries
 - Fast persistent storage using SQLite
-- List, search, decode, delete, and wipe clipboard history
+- List, search, decode, delete, and wipe clipboard history with ease
 - Backwards compatible with Cliphist TSV format
   - Import clipboard history from TSV (e.g., from `cliphist list`)
 - Image preview (shows dimensions and format)
 - Deduplication and entry limit control
 - Text previews with customizable width
+- Automatic clipboard monitoring with `stash watch`
 - Sensitive clipboard filtering via regex (see below)
+
+See [usage section](#usage) for more details.
 
 ## Installation
 
@@ -64,8 +99,10 @@ releases are made when a version gets tagged, and are available under
 [GitHub Releases]. To install Stash on your system without Nix, eiter:
 
 - Download a tagged release from [GitHub Releases] for your platform and place
-  the binary in your `$PATH`.
-- Build from source with Rust:
+  the binary in your `$PATH`. Instructions may differ based on your
+  distribution, but generally you want to download the built binary from
+  releases and put it somewhere like `/usr/bin`.
+- Build and install from source with Cargo:
 
   ```bash
   cargo install --git https://github.com/notashelf/stash
@@ -126,7 +163,10 @@ stash watch
 ```
 
 This runs a daemon that monitors the clipboard and stores new entries
-automatically.
+automatically. This is designed as an alternative to shelling out to
+`wl-paste --watch` inside a Systemd service or XDG autostart. You may find a
+premade Systemd service in `vendor/`. Packagers are encouraged to vendor the
+service unless adding their own.
 
 ### Options
 
@@ -226,7 +266,22 @@ cliphist --import < stash.tsv
 
 ### More Tricks
 
-- Use `stash list` to export your clipboard history in TSV format. This displays
-  your clipboard in the same format as `cliphist list`
-- Use `stash import --type tsv` to import TSV clipboard history from Cliphist or
-  other tools.
+Here are some other tips for Stash that are worth documenting. If you have
+figured out something new, e.g. a neat shell trick, feel free to add it here!
+
+1. You may use `stash list` to view your clipboard history in an interactive
+   TUI. This is obvious if you have ever ran the command, but here are some
+   things that you might not have known.
+   - `stash list` displays the TUI _only_ if the user is in an interactive TTY.
+     E.g. if it's a Bash script, `stash list` **will output TSV**.
+   - You can change the format with `--format` to e.g. JSON but you can also
+     force a TSV format inside an interactive session with `--format tsv`.
+   - `stash list` displays the mime type for newly recorded entries, but it will
+     not be able to display them for entries imported by Cliphist since Cliphist
+     never made a record of this data.
+2. You can pipe `cliphist list --db ~/.cache/cliphist/db` to
+   `stash import --type tsv` to mimic importing from STDIN.
+
+   ```bash
+   cliphist list --db ~/.cache/cliphist/db | stash import
+   ```
