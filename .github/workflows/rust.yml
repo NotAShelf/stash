@@ -1,10 +1,13 @@
 name: Build with Cargo
 
+permissions:
+  contents: read
+
 on:
+  workflow_dispatch:
   push:
     branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+    paths: [ "src/**.rs", "Cargo.toml", "Cargo.lock"]
 
 env:
   CARGO_TERM_COLOR: always
@@ -13,6 +16,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build --verbose
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Build
+        run: cargo build --verbose
