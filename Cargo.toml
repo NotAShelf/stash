@@ -24,7 +24,7 @@ wl-clipboard-rs = "0.9.2"
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 smol = "2.0.2"
 serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.142"
+serde_json = "1.0.143"
 base64 = "0.22.1"
 regex = "1.11.1"
 ratatui = "0.29.0"
