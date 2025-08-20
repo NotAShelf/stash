@@ -290,6 +290,10 @@ impl ClipboardDb for SqliteClipboardDb {
       .conn
       .execute("DELETE FROM clipboard", [])
       .map_err(|e| StashError::Wipe(e.to_string()))?;
+    self
+      .conn
+      .execute("DELETE FROM sqlite_sequence WHERE name = 'clipboard'", [])
+      .map_err(|e| StashError::Wipe(e.to_string()))?;
     Ok(())
   }
 
