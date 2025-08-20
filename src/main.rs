@@ -11,19 +11,16 @@ use inquire::Confirm;
 
 mod commands;
 mod db;
-mod import;
 
-use crate::{
-  commands::{
-    decode::DecodeCommand,
-    delete::DeleteCommand,
-    list::ListCommand,
-    query::QueryCommand,
-    store::StoreCommand,
-    watch::WatchCommand,
-    wipe::WipeCommand,
-  },
+use crate::commands::{
+  decode::DecodeCommand,
+  delete::DeleteCommand,
   import::ImportCommand,
+  list::ListCommand,
+  query::QueryCommand,
+  store::StoreCommand,
+  watch::WatchCommand,
+  wipe::WipeCommand,
 };
 
 #[derive(Parser)]
@@ -299,7 +296,9 @@ fn main() {
           let format = r#type.as_deref().unwrap_or("tsv");
           match format {
             "tsv" => {
-              if let Err(e) = db.import_tsv(io::stdin(), cli.max_items) {
+              if let Err(e) =
+                ImportCommand::import_tsv(&db, io::stdin(), cli.max_items)
+              {
                 log::error!("Failed to import TSV: {e}");
               }
             },

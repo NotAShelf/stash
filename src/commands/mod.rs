@@ -1,5 +1,6 @@
 pub mod decode;
 pub mod delete;
+pub mod import;
 pub mod list;
 pub mod query;
 pub mod store;

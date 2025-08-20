@@ -2,14 +2,41 @@ use std::io::{self, BufRead};
 
 use log::{error, info};
 
-use crate::db::{Entry, SqliteClipboardDb, detect_mime};
+use crate::db::{
+  ClipboardDb,
+  Entry,
+  SqliteClipboardDb,
+  StashError,
+  detect_mime,
+};
 
 pub trait ImportCommand {
-  fn import_tsv(&self, input: impl io::Read);
+  /// Import clipboard entries from TSV format.
+  ///
+  /// # Arguments
+  ///
+  /// * `input` - A readable stream containing TSV lines, each of the form
+  ///   `<id>\t<contents>`.
+  /// * `max_items` - The maximum number of clipboard entries to keep after
+  ///   import. If set to `u64::MAX`, no trimming occurs.
+  ///
+  /// # Returns
+  ///
+  /// * `Ok(())` if all entries are imported and trimming succeeds.
+  /// * `Err(StashError)` if any error occurs during import or trimming.
+  fn import_tsv(
+    &self,
+    input: impl io::Read,
+    max_items: u64,
+  ) -> Result<(), StashError>;
 }
 
 impl ImportCommand for SqliteClipboardDb {
-  fn import_tsv(&self, input: impl io::Read) {
+  fn import_tsv(
+    &self,
+    input: impl io::Read,
+    max_items: u64,
+  ) -> Result<(), StashError> {
     let reader = io::BufReader::new(input);
     let mut imported = 0;
     for line in reader.lines().map_while(Result::ok) {
@@ -41,5 +68,10 @@ impl ImportCommand for SqliteClipboardDb {
       }
     }
     info!("Imported {imported} records from TSV into SQLite database.");
+
+    // Trim database to max_items after import
+    self.trim_db(max_items)?;
+    info!("Trimmed clipboard database to max_items = {max_items}");
+    Ok(())
   }
 }
