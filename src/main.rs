@@ -34,12 +34,17 @@ struct Cli {
   #[arg(long, default_value_t = u64::MAX)]
   max_items: u64,
 
+  /// Number of recent entries to check for duplicates when storing new
+  /// clipboard data.
   #[arg(long, default_value_t = 100)]
   max_dedupe_search: u64,
 
+  /// Maximum width (in characters) for clipboard entry previews in list
+  /// output.
   #[arg(long, default_value_t = 100)]
   preview_width: u32,
 
+  /// Path to the SQLite clipboard database file.
   #[arg(long)]
   db_path: Option<PathBuf>,
 
