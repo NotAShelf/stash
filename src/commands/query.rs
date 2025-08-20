@@ -1,13 +1,11 @@
-use crate::db::{ClipboardDb, SqliteClipboardDb};
-
-use crate::db::StashError;
+use crate::db::{ClipboardDb, SqliteClipboardDb, StashError};
 
 pub trait QueryCommand {
-    fn query_delete(&self, query: &str) -> Result<usize, StashError>;
+  fn query_delete(&self, query: &str) -> Result<usize, StashError>;
 }
 
 impl QueryCommand for SqliteClipboardDb {
-    fn query_delete(&self, query: &str) -> Result<usize, StashError> {
-        <SqliteClipboardDb as ClipboardDb>::delete_query(self, query)
-    }
+  fn query_delete(&self, query: &str) -> Result<usize, StashError> {
+    <SqliteClipboardDb as ClipboardDb>::delete_query(self, query)
+  }
 }
