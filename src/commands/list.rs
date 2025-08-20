@@ -16,14 +16,11 @@ impl ListCommand for SqliteClipboardDb {
     out: impl Write,
     preview_width: u32,
   ) -> Result<(), StashError> {
-    self.list_entries(out, preview_width)?;
-    log::info!("Listed clipboard entries");
-    Ok(())
+    self.list_entries(out, preview_width).map(|_| ())
   }
 }
 
 impl SqliteClipboardDb {
-  /// Public TUI listing function for use in main.rs
   #[allow(clippy::too_many_lines)]
   pub fn list_tui(&self, preview_width: u32) -> Result<(), StashError> {
     use std::io::stdout;
@@ -272,14 +269,14 @@ impl SqliteClipboardDb {
       Ok(())
     })();
 
-    disable_raw_mode().ok();
-    execute!(
+    // Ignore errors during terminal restore, as we can't recover here.
+    let _ = disable_raw_mode();
+    let _ = execute!(
       terminal.backend_mut(),
       LeaveAlternateScreen,
       DisableMouseCapture
-    )
-    .ok();
-    terminal.show_cursor().ok();
+    );
+    let _ = terminal.show_cursor();
 
     res
   }
