@@ -2,8 +2,6 @@
   lib,
   craneLib,
 }: let
-  inherit (craneLib) buildDepsOnly buildPackage;
-
   pname = "stash";
   version = (builtins.fromTOML (builtins.readFile ../Cargo.toml)).package.version;
   src = let
@@ -19,15 +17,19 @@
       ];
     };
 
-  cargoArtifacts = buildDepsOnly {
+  cargoArtifacts = craneLib.buildDepsOnly {
     name = "${pname}-deps";
     strictDeps = true;
     inherit src;
   };
 in
-  buildPackage {
-    inherit cargoArtifacts pname src version;
+  craneLib.buildPackage {
+    inherit pname src version cargoArtifacts;
+
     strictDeps = true;
+
+    # Install Systemd service for Stash into $out/share.
+    # This can be used to use Stash in 'systemd.packages'
     postInstall = ''
       mkdir -p $out
       install -Dm755 ${../vendor/stash.service} $out/share/stash.service
@@ -35,8 +37,9 @@ in
 
     meta = {
       description = "Wayland clipboard manager with fast persistent history and multi-media support";
-      maintainers = [lib.maintainers.NotAShelf];
+      homepage = "https://github.com/notashelf/stash";
       license = lib.licenses.mpl20;
+      maintainers = [lib.maintainers.NotAShelf];
       mainProgram = "stash";
     };
   }
