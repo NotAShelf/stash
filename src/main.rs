@@ -1,11 +1,10 @@
 use std::{
   env,
-  io::{self},
+  io::{self, IsTerminal},
   path::PathBuf,
   process,
 };
 
-use atty::Stream;
 use clap::{CommandFactory, Parser, Subcommand};
 use inquire::Confirm;
 
@@ -44,7 +43,7 @@ struct Cli {
   #[arg(long, default_value_t = 100)]
   preview_width: u32,
 
-  /// Path to the SQLite clipboard database file.
+  /// Path to the `SQLite` clipboard database file.
   #[arg(long)]
   db_path: Option<PathBuf>,
 
@@ -187,7 +186,7 @@ fn main() {
             log::error!("Unsupported format: {other}");
           },
           None => {
-            if atty::is(Stream::Stdout) {
+            if std::io::stdout().is_terminal() {
               report_error(
                 db.list_tui(cli.preview_width),
                 "Failed to list entries in TUI",
