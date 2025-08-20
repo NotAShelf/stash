@@ -33,7 +33,8 @@ struct Cli {
   #[command(subcommand)]
   command: Option<Command>,
 
-  #[arg(long, default_value_t = 750)]
+  /// Maximum number of clipboard entries to keep
+  #[arg(long, default_value_t = u64::MAX)]
   max_items: u64,
 
   #[arg(long, default_value_t = 100)]
@@ -298,7 +299,9 @@ fn main() {
           let format = r#type.as_deref().unwrap_or("tsv");
           match format {
             "tsv" => {
-              db.import_tsv(io::stdin());
+              if let Err(e) = db.import_tsv(io::stdin(), cli.max_items) {
+                log::error!("Failed to import TSV: {e}");
+              }
             },
             _ => {
               log::error!("Unsupported import format: {format}");
