@@ -1268,7 +1268,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "stash"
+name = "stash-clipboard"
 version = "0.3.0"
 dependencies = [
  "base64",

@@ -1,5 +1,5 @@
 [package]
-name = "stash"
+name = "stash-clipboard"
 description = "Wayland clipboard manager with fast persistent history and multi-media support"
 version = "0.3.0"
 edition = "2024"
@@ -8,6 +8,10 @@ license = "MPL-2.0"
 readme = true
 repository = "https://github.com/notashelf/stash"
 rust-version = "1.85"
+
+[[bin]]
+name = "stash"             # actual binary name for Nix, Cargo, etc.
+path = "src/main.rs"
 
 [features]
 default = ["use-toplevel"]
