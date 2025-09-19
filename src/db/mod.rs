@@ -1,18 +1,20 @@
 use std::{
+  collections::hash_map::DefaultHasher,
   env,
   fmt,
   fs,
+  hash::{Hash, Hasher},
   io::{BufRead, BufReader, Read, Write},
   str,
+  sync::OnceLock,
 };
 
-use base64::{Engine, engine::general_purpose::STANDARD};
-use imagesize::{ImageSize, ImageType};
-use log::{debug, error, info, warn};
+use base64::prelude::*;
+use imagesize::ImageType;
+use log::{debug, error, warn};
 use regex::Regex;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -23,38 +25,38 @@ pub enum StashError {
   AllWhitespace,
 
   #[error("Failed to store entry: {0}")]
-  Store(String),
+  Store(Box<str>),
   #[error("Entry excluded by app filter: {0}")]
-  ExcludedByApp(String),
+  ExcludedByApp(Box<str>),
   #[error("Error reading entry during deduplication: {0}")]
-  DeduplicationRead(String),
+  DeduplicationRead(Box<str>),
   #[error("Error decoding entry during deduplication: {0}")]
-  DeduplicationDecode(String),
+  DeduplicationDecode(Box<str>),
   #[error("Failed to remove entry during deduplication: {0}")]
-  DeduplicationRemove(String),
+  DeduplicationRemove(Box<str>),
   #[error("Failed to trim entry: {0}")]
-  Trim(String),
+  Trim(Box<str>),
   #[error("No entries to delete")]
   NoEntriesToDelete,
   #[error("Failed to delete last entry: {0}")]
-  DeleteLast(String),
+  DeleteLast(Box<str>),
   #[error("Failed to wipe database: {0}")]
-  Wipe(String),
+  Wipe(Box<str>),
   #[error("Failed to decode entry during list: {0}")]
-  ListDecode(String),
+  ListDecode(Box<str>),
   #[error("Failed to read input for decode: {0}")]
-  DecodeRead(String),
+  DecodeRead(Box<str>),
   #[error("Failed to extract id for decode: {0}")]
-  DecodeExtractId(String),
+  DecodeExtractId(Box<str>),
   #[error("Failed to get entry for decode: {0}")]
-  DecodeGet(String),
+  DecodeGet(Box<str>),
 
   #[error("Failed to write decoded entry: {0}")]
-  DecodeWrite(String),
+  DecodeWrite(Box<str>),
   #[error("Failed to delete entry during query delete: {0}")]
-  QueryDelete(String),
+  QueryDelete(Box<str>),
   #[error("Failed to delete entry with id {0}: {1}")]
-  DeleteEntry(u64, String),
+  DeleteEntry(u64, Box<str>),
 }
 
 pub trait ClipboardDb {
@@ -65,8 +67,13 @@ pub trait ClipboardDb {
     max_items: u64,
     excluded_apps: Option<&[String]>,
   ) -> Result<u64, StashError>;
-  fn deduplicate(&self, buf: &[u8], max: u64) -> Result<usize, StashError>;
-  fn trim_db(&self, max: u64) -> Result<(), StashError>;
+
+  fn deduplicate_by_hash(
+    &self,
+    content_hash: i64,
+    max: u64,
+  ) -> Result<usize, StashError>;
+  fn trim_db(&self, max_items: u64) -> Result<(), StashError>;
   fn delete_last(&self) -> Result<(), StashError>;
   fn wipe_db(&self) -> Result<(), StashError>;
   fn list_entries(
@@ -76,12 +83,12 @@ pub trait ClipboardDb {
   ) -> Result<usize, StashError>;
   fn decode_entry(
     &self,
-    in_: impl Read,
+    input: impl Read,
     out: impl Write,
-    input: Option<String>,
+    id_hint: Option<String>,
   ) -> Result<(), StashError>;
   fn delete_query(&self, query: &str) -> Result<usize, StashError>;
-  fn delete_entries(&self, in_: impl Read) -> Result<usize, StashError>;
+  fn delete_entries(&self, input: impl Read) -> Result<usize, StashError>;
   fn next_sequence(&self) -> u64;
 }
 
@@ -105,6 +112,34 @@ pub struct SqliteClipboardDb {
 impl SqliteClipboardDb {
   pub fn new(conn: Connection) -> Result<Self, StashError> {
     conn
+      .pragma_update(None, "synchronous", "OFF")
+      .map_err(|e| {
+        StashError::Store(
+          format!("Failed to set synchronous pragma: {e}").into(),
+        )
+      })?;
+    conn
+      .pragma_update(None, "journal_mode", "MEMORY")
+      .map_err(|e| {
+        StashError::Store(
+          format!("Failed to set journal_mode pragma: {e}").into(),
+        )
+      })?;
+    conn.pragma_update(None, "cache_size", "-256") // 256KB cache
+      .map_err(|e| StashError::Store(format!("Failed to set cache_size pragma: {e}").into()))?;
+    conn
+      .pragma_update(None, "temp_store", "memory")
+      .map_err(|e| {
+        StashError::Store(
+          format!("Failed to set temp_store pragma: {e}").into(),
+        )
+      })?;
+    conn.pragma_update(None, "mmap_size", "0") // disable mmap
+      .map_err(|e| StashError::Store(format!("Failed to set mmap_size pragma: {e}").into()))?;
+    conn.pragma_update(None, "page_size", "512") // small(er) pages
+      .map_err(|e| StashError::Store(format!("Failed to set page_size pragma: {e}").into()))?;
+
+    conn
       .execute_batch(
         "CREATE TABLE IF NOT EXISTS clipboard (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,8 +147,21 @@ impl SqliteClipboardDb {
                 mime TEXT
             );",
       )
-      .map_err(|e| StashError::Store(e.to_string()))?;
-    // Initialize Wayland state in background thread
+      .map_err(|e| StashError::Store(e.to_string().into()))?;
+
+    // Add content_hash column if it doesn't exist
+    // Migration MUST be done to avoid breaking existing installations.
+    let _ =
+      conn.execute("ALTER TABLE clipboard ADD COLUMN content_hash INTEGER", []);
+
+    // Create index for content_hash if it doesn't exist
+    let _ = conn.execute(
+      "CREATE INDEX IF NOT EXISTS idx_content_hash ON clipboard(content_hash)",
+      [],
+    );
+
+    // Initialize Wayland state in background thread. This will be used to track
+    // focused window state.
     #[cfg(feature = "use-toplevel")]
     crate::wayland::init_wayland_state();
     Ok(Self { conn })
@@ -125,33 +173,34 @@ impl SqliteClipboardDb {
     let mut stmt = self
       .conn
       .prepare("SELECT id, contents, mime FROM clipboard ORDER BY id DESC")
-      .map_err(|e| StashError::ListDecode(e.to_string()))?;
+      .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
     let mut rows = stmt
       .query([])
-      .map_err(|e| StashError::ListDecode(e.to_string()))?;
+      .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
 
     let mut entries = Vec::new();
 
     while let Some(row) = rows
       .next()
-      .map_err(|e| StashError::ListDecode(e.to_string()))?
+      .map_err(|e| StashError::ListDecode(e.to_string().into()))?
     {
       let id: u64 = row
         .get(0)
-        .map_err(|e| StashError::ListDecode(e.to_string()))?;
+        .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
       let contents: Vec<u8> = row
         .get(1)
-        .map_err(|e| StashError::ListDecode(e.to_string()))?;
+        .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
       let mime: Option<String> = row
         .get(2)
-        .map_err(|e| StashError::ListDecode(e.to_string()))?;
+        .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+
       let contents_str = match mime.as_deref() {
         Some(m) if m.starts_with("text/") || m == "application/json" => {
-          String::from_utf8_lossy(&contents).to_string()
+          String::from_utf8_lossy(&contents).into_owned()
         },
-        _ => STANDARD.encode(&contents),
+        _ => base64::prelude::BASE64_STANDARD.encode(&contents),
       };
-      entries.push(json!({
+      entries.push(serde_json::json!({
           "id": id,
           "contents": contents_str,
           "mime": mime,
@@ -159,7 +208,7 @@ impl SqliteClipboardDb {
     }
 
     serde_json::to_string_pretty(&entries)
-      .map_err(|e| StashError::ListDecode(e.to_string()))
+      .map_err(|e| StashError::ListDecode(e.to_string().into()))
   }
 }
 
@@ -182,17 +231,13 @@ impl ClipboardDb for SqliteClipboardDb {
       return Err(StashError::AllWhitespace);
     }
 
-    let mime = match detect_mime(&buf) {
-      None => {
-        // If valid UTF-8, treat as text/plain
-        if std::str::from_utf8(&buf).is_ok() {
-          Some("text/plain".to_string())
-        } else {
-          None
-        }
-      },
-      other => other,
-    };
+    // Calculate content hash for deduplication
+    let mut hasher = DefaultHasher::new();
+    buf.hash(&mut hasher);
+    #[allow(clippy::cast_possible_wrap)]
+    let content_hash = hasher.finish() as i64;
+
+    let mime = detect_mime_optimized(&buf);
 
     // Try to load regex from systemd credential file, then env var
     let regex = load_sensitive_regex();
@@ -201,9 +246,7 @@ impl ClipboardDb for SqliteClipboardDb {
       if let Ok(s) = std::str::from_utf8(&buf) {
         if re.is_match(s) {
           warn!("Clipboard entry matches sensitive regex, skipping store.");
-          return Err(StashError::Store(
-            "Filtered by sensitive regex".to_string(),
-          ));
+          return Err(StashError::Store("Filtered by sensitive regex".into()));
         }
       }
     }
@@ -212,50 +255,56 @@ impl ClipboardDb for SqliteClipboardDb {
     if should_exclude_by_app(excluded_apps) {
       warn!("Clipboard entry excluded by app filter");
       return Err(StashError::ExcludedByApp(
-        "Clipboard entry from excluded app".to_string(),
+        "Clipboard entry from excluded app".into(),
       ));
     }
 
-    self.deduplicate(&buf, max_dedupe_search)?;
+    self.deduplicate_by_hash(content_hash, max_dedupe_search)?;
 
     self
       .conn
       .execute(
-        "INSERT INTO clipboard (contents, mime) VALUES (?1, ?2)",
-        params![buf, mime],
+        "INSERT INTO clipboard (contents, mime, content_hash) VALUES (?1, ?2, \
+         ?3)",
+        params![buf, mime.map(|s| s.to_string()), content_hash],
       )
-      .map_err(|e| StashError::Store(e.to_string()))?;
+      .map_err(|e| StashError::Store(e.to_string().into()))?;
 
     self.trim_db(max_items)?;
     Ok(self.next_sequence())
   }
 
-  fn deduplicate(&self, buf: &[u8], max: u64) -> Result<usize, StashError> {
+  fn deduplicate_by_hash(
+    &self,
+    content_hash: i64,
+    max: u64,
+  ) -> Result<usize, StashError> {
     let mut stmt = self
       .conn
-      .prepare("SELECT id, contents FROM clipboard ORDER BY id DESC LIMIT ?1")
-      .map_err(|e| StashError::DeduplicationRead(e.to_string()))?;
+      .prepare(
+        "SELECT id FROM clipboard WHERE content_hash = ?1 ORDER BY id DESC \
+         LIMIT ?2",
+      )
+      .map_err(|e| StashError::DeduplicationRead(e.to_string().into()))?;
     let mut rows = stmt
-      .query(params![i64::try_from(max).unwrap_or(i64::MAX)])
-      .map_err(|e| StashError::DeduplicationRead(e.to_string()))?;
+      .query(params![
+        content_hash,
+        i64::try_from(max).unwrap_or(i64::MAX)
+      ])
+      .map_err(|e| StashError::DeduplicationRead(e.to_string().into()))?;
     let mut deduped = 0;
     while let Some(row) = rows
       .next()
-      .map_err(|e| StashError::DeduplicationRead(e.to_string()))?
+      .map_err(|e| StashError::DeduplicationRead(e.to_string().into()))?
     {
       let id: u64 = row
         .get(0)
-        .map_err(|e| StashError::DeduplicationDecode(e.to_string()))?;
-      let contents: Vec<u8> = row
-        .get(1)
-        .map_err(|e| StashError::DeduplicationDecode(e.to_string()))?;
-      if contents == buf {
-        self
-          .conn
-          .execute("DELETE FROM clipboard WHERE id = ?1", params![id])
-          .map_err(|e| StashError::DeduplicationRemove(e.to_string()))?;
-        deduped += 1;
-      }
+        .map_err(|e| StashError::DeduplicationDecode(e.to_string().into()))?;
+      self
+        .conn
+        .execute("DELETE FROM clipboard WHERE id = ?1", params![id])
+        .map_err(|e| StashError::DeduplicationRemove(e.to_string().into()))?;
+      deduped += 1;
     }
     Ok(deduped)
   }
@@ -264,7 +313,7 @@ impl ClipboardDb for SqliteClipboardDb {
     let count: u64 = self
       .conn
       .query_row("SELECT COUNT(*) FROM clipboard", [], |row| row.get(0))
-      .map_err(|e| StashError::Trim(e.to_string()))?;
+      .map_err(|e| StashError::Trim(e.to_string().into()))?;
     if count > max {
       let to_delete = count - max;
       self
@@ -274,7 +323,7 @@ impl ClipboardDb for SqliteClipboardDb {
            BY id ASC LIMIT ?1)",
           params![i64::try_from(to_delete).unwrap_or(i64::MAX)],
         )
-        .map_err(|e| StashError::Trim(e.to_string()))?;
+        .map_err(|e| StashError::Trim(e.to_string().into()))?;
     }
     Ok(())
   }
@@ -288,12 +337,12 @@ impl ClipboardDb for SqliteClipboardDb {
         |row| row.get(0),
       )
       .optional()
-      .map_err(|e| StashError::DeleteLast(e.to_string()))?;
+      .map_err(|e| StashError::DeleteLast(e.to_string().into()))?;
     if let Some(id) = id {
       self
         .conn
         .execute("DELETE FROM clipboard WHERE id = ?1", params![id])
-        .map_err(|e| StashError::DeleteLast(e.to_string()))?;
+        .map_err(|e| StashError::DeleteLast(e.to_string().into()))?;
       Ok(())
     } else {
       Err(StashError::NoEntriesToDelete)
@@ -304,11 +353,11 @@ impl ClipboardDb for SqliteClipboardDb {
     self
       .conn
       .execute("DELETE FROM clipboard", [])
-      .map_err(|e| StashError::Wipe(e.to_string()))?;
+      .map_err(|e| StashError::Wipe(e.to_string().into()))?;
     self
       .conn
       .execute("DELETE FROM sqlite_sequence WHERE name = 'clipboard'", [])
-      .map_err(|e| StashError::Wipe(e.to_string()))?;
+      .map_err(|e| StashError::Wipe(e.to_string().into()))?;
     Ok(())
   }
 
@@ -320,24 +369,26 @@ impl ClipboardDb for SqliteClipboardDb {
     let mut stmt = self
       .conn
       .prepare("SELECT id, contents, mime FROM clipboard ORDER BY id DESC")
-      .map_err(|e| StashError::ListDecode(e.to_string()))?;
+      .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
     let mut rows = stmt
       .query([])
-      .map_err(|e| StashError::ListDecode(e.to_string()))?;
+      .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
     let mut listed = 0;
+
     while let Some(row) = rows
       .next()
-      .map_err(|e| StashError::ListDecode(e.to_string()))?
+      .map_err(|e| StashError::ListDecode(e.to_string().into()))?
     {
       let id: u64 = row
         .get(0)
-        .map_err(|e| StashError::ListDecode(e.to_string()))?;
+        .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
       let contents: Vec<u8> = row
         .get(1)
-        .map_err(|e| StashError::ListDecode(e.to_string()))?;
+        .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
       let mime: Option<String> = row
         .get(2)
-        .map_err(|e| StashError::ListDecode(e.to_string()))?;
+        .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+
       let preview = preview_entry(&contents, mime.as_deref(), preview_width);
       if writeln!(out, "{id}\t{preview}").is_ok() {
         listed += 1;
@@ -348,21 +399,22 @@ impl ClipboardDb for SqliteClipboardDb {
 
   fn decode_entry(
     &self,
-    mut in_: impl Read,
+    input: impl Read,
     mut out: impl Write,
-    input: Option<String>,
+    id_hint: Option<String>,
   ) -> Result<(), StashError> {
-    let s = if let Some(input) = input {
-      input
+    let input_str = if let Some(s) = id_hint {
+      s
     } else {
+      let mut input = BufReader::new(input);
       let mut buf = String::new();
-      in_
+      input
         .read_to_string(&mut buf)
-        .map_err(|e| StashError::DecodeRead(e.to_string()))?;
+        .map_err(|e| StashError::DecodeExtractId(e.to_string().into()))?;
       buf
     };
-    let id =
-      extract_id(&s).map_err(|e| StashError::DecodeExtractId(e.to_string()))?;
+    let id = extract_id(&input_str)
+      .map_err(|e| StashError::DecodeExtractId(e.into()))?;
     let (contents, _mime): (Vec<u8>, Option<String>) = self
       .conn
       .query_row(
@@ -370,11 +422,11 @@ impl ClipboardDb for SqliteClipboardDb {
         params![id],
         |row| Ok((row.get(0)?, row.get(1)?)),
       )
-      .map_err(|e| StashError::DecodeGet(e.to_string()))?;
+      .map_err(|e| StashError::DecodeGet(e.to_string().into()))?;
     out
       .write_all(&contents)
-      .map_err(|e| StashError::DecodeWrite(e.to_string()))?;
-    info!("Decoded entry with id {id}");
+      .map_err(|e| StashError::DecodeWrite(e.to_string().into()))?;
+    log::info!("Decoded entry with id {id}");
     Ok(())
   }
 
@@ -382,26 +434,26 @@ impl ClipboardDb for SqliteClipboardDb {
     let mut stmt = self
       .conn
       .prepare("SELECT id, contents FROM clipboard")
-      .map_err(|e| StashError::QueryDelete(e.to_string()))?;
+      .map_err(|e| StashError::QueryDelete(e.to_string().into()))?;
     let mut rows = stmt
       .query([])
-      .map_err(|e| StashError::QueryDelete(e.to_string()))?;
+      .map_err(|e| StashError::QueryDelete(e.to_string().into()))?;
     let mut deleted = 0;
     while let Some(row) = rows
       .next()
-      .map_err(|e| StashError::QueryDelete(e.to_string()))?
+      .map_err(|e| StashError::QueryDelete(e.to_string().into()))?
     {
       let id: u64 = row
         .get(0)
-        .map_err(|e| StashError::QueryDelete(e.to_string()))?;
+        .map_err(|e| StashError::QueryDelete(e.to_string().into()))?;
       let contents: Vec<u8> = row
         .get(1)
-        .map_err(|e| StashError::QueryDelete(e.to_string()))?;
+        .map_err(|e| StashError::QueryDelete(e.to_string().into()))?;
       if contents.windows(query.len()).any(|w| w == query.as_bytes()) {
         self
           .conn
           .execute("DELETE FROM clipboard WHERE id = ?1", params![id])
-          .map_err(|e| StashError::QueryDelete(e.to_string()))?;
+          .map_err(|e| StashError::QueryDelete(e.to_string().into()))?;
         deleted += 1;
       }
     }
@@ -416,7 +468,7 @@ impl ClipboardDb for SqliteClipboardDb {
         self
           .conn
           .execute("DELETE FROM clipboard WHERE id = ?1", params![id])
-          .map_err(|e| StashError::DeleteEntry(id, e.to_string()))?;
+          .map_err(|e| StashError::DeleteEntry(id, e.to_string().into()))?;
         deleted += 1;
       }
     }
@@ -435,30 +487,36 @@ impl ClipboardDb for SqliteClipboardDb {
   }
 }
 
-// Helper functions
-
 /// Try to load a sensitive regex from systemd credential or env.
 ///
 /// # Returns
+///
 ///  `Some(Regex)` if present and valid, `None` otherwise.
 fn load_sensitive_regex() -> Option<Regex> {
-  if let Ok(regex_path) = env::var("CREDENTIALS_DIRECTORY") {
-    let file = format!("{regex_path}/clipboard_filter");
-    if let Ok(contents) = fs::read_to_string(&file) {
-      if let Ok(re) = Regex::new(contents.trim()) {
-        return Some(re);
+  static REGEX_CACHE: OnceLock<Option<Regex>> = OnceLock::new();
+  static CHECKED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+  if !CHECKED.load(std::sync::atomic::Ordering::Relaxed) {
+    CHECKED.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    let regex = if let Ok(regex_path) = env::var("CREDENTIALS_DIRECTORY") {
+      let file = format!("{regex_path}/clipboard_filter");
+      if let Ok(contents) = fs::read_to_string(&file) {
+        Regex::new(contents.trim()).ok()
+      } else {
+        None
       }
-    }
+    } else if let Ok(pattern) = env::var("STASH_SENSITIVE_REGEX") {
+      Regex::new(&pattern).ok()
+    } else {
+      None
+    };
+
+    let _ = REGEX_CACHE.set(regex);
   }
 
-  // Fallback to an environment variable
-  if let Ok(pattern) = env::var("STASH_SENSITIVE_REGEX") {
-    if let Ok(re) = Regex::new(&pattern) {
-      return Some(re);
-    }
-  }
-
-  None
+  REGEX_CACHE.get().and_then(std::clone::Clone::clone)
 }
 
 pub fn extract_id(input: &str) -> Result<u64, &'static str> {
@@ -466,35 +524,45 @@ pub fn extract_id(input: &str) -> Result<u64, &'static str> {
   id_str.parse().map_err(|_| "invalid id")
 }
 
+pub fn detect_mime_optimized(data: &[u8]) -> Option<String> {
+  // Check if it's valid UTF-8 first, which most clipboard content are.
+  // This will be used to return early without unnecessary mimetype detection
+  // overhead.
+  if std::str::from_utf8(data).is_ok() {
+    return Some("text/plain".to_string());
+  }
+
+  // Only run image detection on binary data
+  detect_mime(data)
+}
+
 pub fn detect_mime(data: &[u8]) -> Option<String> {
   if let Ok(img_type) = imagesize::image_type(data) {
-    Some(
-      match img_type {
-        ImageType::Png => "image/png",
-        ImageType::Jpeg => "image/jpeg",
-        ImageType::Gif => "image/gif",
-        ImageType::Bmp => "image/bmp",
-        ImageType::Tiff => "image/tiff",
-        ImageType::Webp => "image/webp",
-        ImageType::Aseprite => "image/x-aseprite",
-        ImageType::Dds => "image/vnd.ms-dds",
-        ImageType::Exr => "image/aces",
-        ImageType::Farbfeld => "image/farbfeld",
-        ImageType::Hdr => "image/vnd.radiance",
-        ImageType::Ico => "image/x-icon",
-        ImageType::Ilbm => "image/ilbm",
-        ImageType::Jxl => "image/jxl",
-        ImageType::Ktx2 => "image/ktx2",
-        ImageType::Pnm => "image/x-portable-anymap",
-        ImageType::Psd => "image/vnd.adobe.photoshop",
-        ImageType::Qoi => "image/qoi",
-        ImageType::Tga => "image/x-tga",
-        ImageType::Vtf => "image/x-vtf",
-        ImageType::Heif(_) => "image/heif",
-        _ => "application/octet-stream",
-      }
-      .to_string(),
-    )
+    let mime_str = match img_type {
+      ImageType::Png => "image/png",
+      ImageType::Jpeg => "image/jpeg",
+      ImageType::Gif => "image/gif",
+      ImageType::Bmp => "image/bmp",
+      ImageType::Tiff => "image/tiff",
+      ImageType::Webp => "image/webp",
+      ImageType::Aseprite => "image/x-aseprite",
+      ImageType::Dds => "image/vnd.ms-dds",
+      ImageType::Exr => "image/aces",
+      ImageType::Farbfeld => "image/farbfeld",
+      ImageType::Hdr => "image/vnd.radiance",
+      ImageType::Ico => "image/x-icon",
+      ImageType::Ilbm => "image/ilbm",
+      ImageType::Jxl => "image/jxl",
+      ImageType::Ktx2 => "image/ktx2",
+      ImageType::Pnm => "image/x-portable-anymap",
+      ImageType::Psd => "image/vnd.adobe.photoshop",
+      ImageType::Qoi => "image/qoi",
+      ImageType::Tga => "image/x-tga",
+      ImageType::Vtf => "image/x-vtf",
+      ImageType::Heif(_) => "image/heif",
+      _ => "application/octet-stream",
+    };
+    Some(mime_str.to_string())
   } else {
     None
   }
@@ -503,38 +571,54 @@ pub fn detect_mime(data: &[u8]) -> Option<String> {
 pub fn preview_entry(data: &[u8], mime: Option<&str>, width: u32) -> String {
   if let Some(mime) = mime {
     if mime.starts_with("image/") {
-      if let Ok(ImageSize {
-        width: img_width,
-        height: img_height,
-      }) = imagesize::blob_size(data)
-      {
-        return format!(
-          "[[ binary data {} {} {}x{} ]]",
-          size_str(data.len()),
-          mime,
-          img_width,
-          img_height
-        );
-      }
+      return format!("[[ binary data {} {} ]]", size_str(data.len()), mime);
     } else if mime == "application/json" || mime.starts_with("text/") {
-      let s = match str::from_utf8(data) {
-        Ok(s) => s,
-        Err(e) => {
-          error!("Failed to decode UTF-8 clipboard data: {e}");
-          ""
-        },
+      let Ok(s) = str::from_utf8(data) else {
+        return format!("[[ invalid UTF-8 {} ]]", size_str(data.len()));
       };
-      let s = s.trim().replace(|c: char| c.is_whitespace(), " ");
-      return truncate(&s, width as usize, "…");
+
+      let trimmed = s.trim();
+      if trimmed.len() <= width as usize
+        && !trimmed.chars().any(|c| c.is_whitespace() && c != ' ')
+      {
+        return trimmed.to_string();
+      }
+
+      // Only allocate new string if we need to replace whitespace
+      let mut result = String::with_capacity(width as usize + 1);
+      for (char_count, c) in trimmed.chars().enumerate() {
+        if char_count >= width as usize {
+          result.push('…');
+          break;
+        }
+
+        if c.is_whitespace() {
+          result.push(' ');
+        } else {
+          result.push(c);
+        }
+      }
+      return result;
     }
   }
+
+  // For non-text data, use lossy conversion
   let s = String::from_utf8_lossy(data);
   truncate(s.trim(), width as usize, "…")
 }
 
 pub fn truncate(s: &str, max: usize, ellip: &str) -> String {
-  if s.chars().count() > max {
-    s.chars().take(max).collect::<String>() + ellip
+  let char_count = s.chars().count();
+  if char_count > max {
+    let mut result = String::with_capacity(max * 4 + ellip.len()); // UTF-8 worst case
+    let mut char_iter = s.chars();
+    for _ in 0..max {
+      if let Some(c) = char_iter.next() {
+        result.push(c);
+      }
+    }
+    result.push_str(ellip);
+    result
   } else {
     s.to_string()
   }
@@ -630,7 +714,7 @@ fn get_recently_active_excluded_app(
 
   let mut candidates = Vec::new();
 
-  if let Ok(entries) = fs::read_dir(proc_dir) {
+  if let Ok(entries) = std::fs::read_dir(proc_dir) {
     for entry in entries.flatten() {
       if let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() {
         if let Ok(comm) = fs::read_to_string(format!("/proc/{pid}/comm")) {
@@ -729,9 +813,7 @@ fn get_process_activity_score(pid: u32) -> u64 {
 /// Check if an app name matches any in the exclusion list.
 /// Supports basic string matching and simple regex patterns.
 fn app_matches_exclusion(app_name: &str, excluded_apps: &[String]) -> bool {
-  debug!(
-    "Checking if '{app_name}' matches exclusion list: {excluded_apps:?}"
-  );
+  debug!("Checking if '{app_name}' matches exclusion list: {excluded_apps:?}");
 
   for excluded in excluded_apps {
     // Basic string matching (case-insensitive)
@@ -753,9 +835,7 @@ fn app_matches_exclusion(app_name: &str, excluded_apps: &[String]) -> bool {
       let pattern = excluded.replace('*', ".*");
       if let Ok(regex) = regex::Regex::new(&pattern) {
         if regex.is_match(app_name) {
-          debug!(
-            "Matched wildcard pattern: {app_name} matches {excluded}"
-          );
+          debug!("Matched wildcard pattern: {app_name} matches {excluded}");
           return true;
         }
       }

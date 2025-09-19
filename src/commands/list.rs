@@ -47,27 +47,27 @@ impl SqliteClipboardDb {
     let mut stmt = self
       .conn
       .prepare("SELECT id, contents, mime FROM clipboard ORDER BY id DESC")
-      .map_err(|e| StashError::ListDecode(e.to_string()))?;
+      .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
     let mut rows = stmt
       .query([])
-      .map_err(|e| StashError::ListDecode(e.to_string()))?;
+      .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
 
     let mut entries: Vec<(u64, String, String)> = Vec::new();
     let mut max_id_width = 2;
     let mut max_mime_width = 8;
     while let Some(row) = rows
       .next()
-      .map_err(|e| StashError::ListDecode(e.to_string()))?
+      .map_err(|e| StashError::ListDecode(e.to_string().into()))?
     {
       let id: u64 = row
         .get(0)
-        .map_err(|e| StashError::ListDecode(e.to_string()))?;
+        .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
       let contents: Vec<u8> = row
         .get(1)
-        .map_err(|e| StashError::ListDecode(e.to_string()))?;
+        .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
       let mime: Option<String> = row
         .get(2)
-        .map_err(|e| StashError::ListDecode(e.to_string()))?;
+        .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
       let preview =
         crate::db::preview_entry(&contents, mime.as_deref(), preview_width);
       let mime_str = mime.as_deref().unwrap_or("").to_string();
@@ -77,13 +77,14 @@ impl SqliteClipboardDb {
       entries.push((id, preview, mime_str));
     }
 
-    enable_raw_mode().map_err(|e| StashError::ListDecode(e.to_string()))?;
+    enable_raw_mode()
+      .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
     let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
-      .map_err(|e| StashError::ListDecode(e.to_string()))?;
+      .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)
-      .map_err(|e| StashError::ListDecode(e.to_string()))?;
+      .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
 
     let mut state = ListState::default();
     if !entries.is_empty() {
@@ -225,13 +226,13 @@ impl SqliteClipboardDb {
 
             f.render_stateful_widget(list, area, &mut state);
           })
-          .map_err(|e| StashError::ListDecode(e.to_string()))?;
+          .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
 
         if event::poll(std::time::Duration::from_millis(250))
-          .map_err(|e| StashError::ListDecode(e.to_string()))?
+          .map_err(|e| StashError::ListDecode(e.to_string().into()))?
         {
-          if let Event::Key(key) =
-            event::read().map_err(|e| StashError::ListDecode(e.to_string()))?
+          if let Event::Key(key) = event::read()
+            .map_err(|e| StashError::ListDecode(e.to_string().into()))?
           {
             match key.code {
               KeyCode::Char('q') | KeyCode::Esc => break,

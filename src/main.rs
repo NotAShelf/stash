@@ -36,7 +36,7 @@ struct Cli {
 
   /// Number of recent entries to check for duplicates when storing new
   /// clipboard data.
-  #[arg(long, default_value_t = 100)]
+  #[arg(long, default_value_t = 20)]
   max_dedupe_search: u64,
 
   /// Maximum width (in characters) for clipboard entry previews in list

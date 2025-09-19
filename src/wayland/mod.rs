@@ -25,7 +25,7 @@ static TOPLEVEL_APPS: LazyLock<Mutex<HashMap<ObjectId, String>>> =
 pub fn init_wayland_state() {
   std::thread::spawn(|| {
     if let Err(e) = run_wayland_event_loop() {
-      debug!("Wayland event loop error: {}", e);
+      debug!("Wayland event loop error: {e}");
     }
   });
 }
@@ -35,7 +35,7 @@ pub fn get_focused_window_app() -> Option<String> {
   // Try Wayland protocol first
   if let Ok(focused) = FOCUSED_APP.lock() {
     if let Some(ref app) = *focused {
-      debug!("Found focused app via Wayland protocol: {}", app);
+      debug!("Found focused app via Wayland protocol: {app}");
       return Some(app.clone());
     }
   }
@@ -49,7 +49,7 @@ fn run_wayland_event_loop() -> Result<(), Box<dyn std::error::Error>> {
   let conn = match WaylandConnection::connect_to_env() {
     Ok(conn) => conn,
     Err(e) => {
-      debug!("Failed to connect to Wayland: {}", e);
+      debug!("Failed to connect to Wayland: {e}");
       return Ok(());
     },
   };
@@ -111,7 +111,7 @@ impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for AppState {
     {
       // New toplevel created
       // We'll track it for focus events
-      let _handle: ZwlrForeignToplevelHandleV1 = toplevel;
+      let _: ZwlrForeignToplevelHandleV1 = toplevel;
     }
   }
 
@@ -136,7 +136,7 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for AppState {
 
     match event {
       zwlr_foreign_toplevel_handle_v1::Event::AppId { app_id } => {
-        debug!("Toplevel app_id: {}", app_id);
+        debug!("Toplevel app_id: {app_id}");
         // Store the app_id for this handle
         if let Ok(mut apps) = TOPLEVEL_APPS.lock() {
           apps.insert(handle_id, app_id);
@@ -157,7 +157,7 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for AppState {
             (TOPLEVEL_APPS.lock(), FOCUSED_APP.lock())
           {
             if let Some(app_id) = apps.get(&handle_id) {
-              debug!("Setting focused app to: {}", app_id);
+              debug!("Setting focused app to: {app_id}");
               *focused = Some(app_id.clone());
             }
           }
