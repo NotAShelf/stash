@@ -1,5 +1,6 @@
 [package]
 name = "stash"
+description = "Wayland clipboard manager with fast persistent history and multi-media support"
 version = "0.3.0"
 edition = "2024"
 authors = ["NotAShelf <raf@notashelf.dev>"]
