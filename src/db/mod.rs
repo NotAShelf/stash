@@ -8,7 +8,7 @@ use std::{
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use imagesize::{ImageSize, ImageType};
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use regex::Regex;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -24,6 +24,8 @@ pub enum StashError {
 
   #[error("Failed to store entry: {0}")]
   Store(String),
+  #[error("Entry excluded by app filter: {0}")]
+  ExcludedByApp(String),
   #[error("Error reading entry during deduplication: {0}")]
   DeduplicationRead(String),
   #[error("Error decoding entry during deduplication: {0}")]
@@ -61,6 +63,7 @@ pub trait ClipboardDb {
     input: impl Read,
     max_dedupe_search: u64,
     max_items: u64,
+    excluded_apps: Option<&[String]>,
   ) -> Result<u64, StashError>;
   fn deduplicate(&self, buf: &[u8], max: u64) -> Result<usize, StashError>;
   fn trim_db(&self, max: u64) -> Result<(), StashError>;
@@ -110,6 +113,9 @@ impl SqliteClipboardDb {
             );",
       )
       .map_err(|e| StashError::Store(e.to_string()))?;
+    // Initialize Wayland state in background thread
+    #[cfg(feature = "use-toplevel")]
+    crate::wayland::init_wayland_state();
     Ok(Self { conn })
   }
 }
@@ -163,6 +169,7 @@ impl ClipboardDb for SqliteClipboardDb {
     mut input: impl Read,
     max_dedupe_search: u64,
     max_items: u64,
+    excluded_apps: Option<&[String]>,
   ) -> Result<u64, StashError> {
     let mut buf = Vec::new();
     if input.read_to_end(&mut buf).is_err()
@@ -199,6 +206,14 @@ impl ClipboardDb for SqliteClipboardDb {
           ));
         }
       }
+    }
+
+    // Check if clipboard should be excluded based on running apps
+    if should_exclude_by_app(excluded_apps) {
+      warn!("Clipboard entry excluded by app filter");
+      return Err(StashError::ExcludedByApp(
+        "Clipboard entry from excluded app".to_string(),
+      ));
     }
 
     self.deduplicate(&buf, max_dedupe_search)?;
@@ -539,4 +554,214 @@ pub fn size_str(size: usize) -> String {
     i += 1;
   }
   format!("{:.0} {}", fsize, units[i])
+}
+
+/// Check if clipboard should be excluded based on excluded apps configuration.
+/// Uses timing correlation and focused window detection to identify source app.
+fn should_exclude_by_app(excluded_apps: Option<&[String]>) -> bool {
+  let excluded = match excluded_apps {
+    Some(apps) if !apps.is_empty() => apps,
+    _ => return false,
+  };
+
+  // Try multiple detection strategies
+  if detect_excluded_app_activity(excluded) {
+    return true;
+  }
+
+  false
+}
+
+/// Detect if clipboard likely came from an excluded app using multiple
+/// strategies.
+fn detect_excluded_app_activity(excluded_apps: &[String]) -> bool {
+  debug!("Checking clipboard exclusion against: {excluded_apps:?}");
+
+  // Strategy 1: Check focused window (compositor-dependent)
+  if let Some(focused_app) = get_focused_window_app() {
+    debug!("Focused window detected: {focused_app}");
+    if app_matches_exclusion(&focused_app, excluded_apps) {
+      debug!("Clipboard excluded: focused window matches {focused_app}");
+      return true;
+    }
+  } else {
+    debug!("No focused window detected");
+  }
+
+  // Strategy 2: Check recently active processes (timing correlation)
+  if let Some(active_app) = get_recently_active_excluded_app(excluded_apps) {
+    debug!("Clipboard excluded: recent activity from {active_app}");
+    return true;
+  }
+  debug!("No recently active excluded apps found");
+
+  debug!("Clipboard not excluded");
+  false
+}
+
+/// Try to get the currently focused window application name.
+fn get_focused_window_app() -> Option<String> {
+  // Try Wayland protocol first
+  #[cfg(feature = "use-toplevel")]
+  if let Some(app) = crate::wayland::get_focused_window_app() {
+    return Some(app);
+  }
+
+  // Fallback: Check WAYLAND_CLIENT_NAME environment variable
+  if let Ok(client) = env::var("WAYLAND_CLIENT_NAME") {
+    if !client.is_empty() {
+      debug!("Found WAYLAND_CLIENT_NAME: {client}");
+      return Some(client);
+    }
+  }
+
+  debug!("No focused window detection method worked");
+  None
+}
+
+/// Check for recently active excluded apps using CPU and I/O activity.
+fn get_recently_active_excluded_app(
+  excluded_apps: &[String],
+) -> Option<String> {
+  let proc_dir = std::path::Path::new("/proc");
+  if !proc_dir.exists() {
+    return None;
+  }
+
+  let mut candidates = Vec::new();
+
+  if let Ok(entries) = fs::read_dir(proc_dir) {
+    for entry in entries.flatten() {
+      if let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() {
+        if let Ok(comm) = fs::read_to_string(format!("/proc/{pid}/comm")) {
+          let process_name = comm.trim();
+
+          // Check process name against exclusion list
+          if app_matches_exclusion(process_name, excluded_apps)
+            && has_recent_activity(pid)
+          {
+            candidates.push((
+              process_name.to_string(),
+              get_process_activity_score(pid),
+            ));
+          }
+        }
+      }
+    }
+  }
+
+  // Return the most active excluded app
+  candidates
+    .into_iter()
+    .max_by_key(|(_, score)| *score)
+    .map(|(name, _)| name)
+}
+
+/// Check if a process has had recent activity (simple heuristic).
+fn has_recent_activity(pid: u32) -> bool {
+  // Check /proc/PID/stat for recent CPU usage
+  if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
+    let fields: Vec<&str> = stat.split_whitespace().collect();
+    if fields.len() > 14 {
+      // Fields 14 and 15 are utime and stime
+      if let (Ok(utime), Ok(stime)) =
+        (fields[13].parse::<u64>(), fields[14].parse::<u64>())
+      {
+        let total_time = utime + stime;
+        // Simple heuristic: if process has any significant CPU time, consider
+        // it active
+        return total_time > 100; // arbitrary threshold
+      }
+    }
+  }
+
+  // Check /proc/PID/io for recent I/O activity
+  if let Ok(io_stats) = fs::read_to_string(format!("/proc/{pid}/io")) {
+    for line in io_stats.lines() {
+      if line.starts_with("write_bytes:") || line.starts_with("read_bytes:") {
+        if let Some(value_str) = line.split(':').nth(1) {
+          if let Ok(value) = value_str.trim().parse::<u64>() {
+            if value > 1024 * 1024 {
+              // 1MB threshold
+              return true;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  false
+}
+
+/// Get a simple activity score for process prioritization.
+fn get_process_activity_score(pid: u32) -> u64 {
+  let mut score = 0;
+
+  // Add CPU time to score
+  if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
+    let fields: Vec<&str> = stat.split_whitespace().collect();
+    if fields.len() > 14 {
+      if let (Ok(utime), Ok(stime)) =
+        (fields[13].parse::<u64>(), fields[14].parse::<u64>())
+      {
+        score += utime + stime;
+      }
+    }
+  }
+
+  // Add I/O activity to score
+  if let Ok(io_stats) = fs::read_to_string(format!("/proc/{pid}/io")) {
+    for line in io_stats.lines() {
+      if line.starts_with("write_bytes:") || line.starts_with("read_bytes:") {
+        if let Some(value_str) = line.split(':').nth(1) {
+          if let Ok(value) = value_str.trim().parse::<u64>() {
+            score += value / 1024; // convert to KB
+          }
+        }
+      }
+    }
+  }
+
+  score
+}
+
+/// Check if an app name matches any in the exclusion list.
+/// Supports basic string matching and simple regex patterns.
+fn app_matches_exclusion(app_name: &str, excluded_apps: &[String]) -> bool {
+  debug!(
+    "Checking if '{app_name}' matches exclusion list: {excluded_apps:?}"
+  );
+
+  for excluded in excluded_apps {
+    // Basic string matching (case-insensitive)
+    if app_name.to_lowercase() == excluded.to_lowercase() {
+      debug!("Matched exact string: {app_name} == {excluded}");
+      return true;
+    }
+
+    // Simple pattern matching for common cases
+    if excluded.starts_with('^') && excluded.ends_with('$') {
+      // Exact match pattern like ^AppName$
+      let pattern = &excluded[1..excluded.len() - 1];
+      if app_name == pattern {
+        debug!("Matched exact pattern: {app_name} == {pattern}");
+        return true;
+      }
+    } else if excluded.contains('*') {
+      // Simple wildcard matching
+      let pattern = excluded.replace('*', ".*");
+      if let Ok(regex) = regex::Regex::new(&pattern) {
+        if regex.is_match(app_name) {
+          debug!(
+            "Matched wildcard pattern: {app_name} matches {excluded}"
+          );
+          return true;
+        }
+      }
+    }
+  }
+
+  debug!("No match found for '{app_name}'");
+  false
 }

@@ -10,6 +10,7 @@ use inquire::Confirm;
 
 mod commands;
 mod db;
+#[cfg(feature = "use-toplevel")] mod wayland;
 
 use crate::commands::{
   decode::DecodeCommand,
@@ -46,6 +47,11 @@ struct Cli {
   /// Path to the `SQLite` clipboard database file.
   #[arg(long)]
   db_path: Option<PathBuf>,
+
+  /// Application names to exclude from clipboard history
+  #[cfg(feature = "use-toplevel")]
+  #[arg(long, value_delimiter = ',', env = "STASH_EXCLUDED_APPS")]
+  excluded_apps: Vec<String>,
 
   /// Ask for confirmation before destructive operations
   #[arg(long)]
@@ -160,7 +166,16 @@ fn main() {
       Some(Command::Store) => {
         let state = env::var("STASH_CLIPBOARD_STATE").ok();
         report_error(
-          db.store(io::stdin(), cli.max_dedupe_search, cli.max_items, state),
+          db.store(
+            io::stdin(),
+            cli.max_dedupe_search,
+            cli.max_items,
+            state,
+            #[cfg(feature = "use-toplevel")]
+            &cli.excluded_apps,
+            #[cfg(not(feature = "use-toplevel"))]
+            &[],
+          ),
           "Failed to store entry",
         );
       },
@@ -313,7 +328,14 @@ fn main() {
         }
       },
       Some(Command::Watch) => {
-        db.watch(cli.max_dedupe_search, cli.max_items);
+        db.watch(
+          cli.max_dedupe_search,
+          cli.max_items,
+          #[cfg(feature = "use-toplevel")]
+          &cli.excluded_apps,
+          #[cfg(not(feature = "use-toplevel"))]
+          &[],
+        );
       },
       None => {
         if let Err(e) = Cli::command().print_help() {

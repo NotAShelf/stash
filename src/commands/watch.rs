@@ -6,11 +6,21 @@ use wl_clipboard_rs::paste::{ClipboardType, Seat, get_contents};
 use crate::db::{ClipboardDb, Entry, SqliteClipboardDb};
 
 pub trait WatchCommand {
-  fn watch(&self, max_dedupe_search: u64, max_items: u64);
+  fn watch(
+    &self,
+    max_dedupe_search: u64,
+    max_items: u64,
+    excluded_apps: &[String],
+  );
 }
 
 impl WatchCommand for SqliteClipboardDb {
-  fn watch(&self, max_dedupe_search: u64, max_items: u64) {
+  fn watch(
+    &self,
+    max_dedupe_search: u64,
+    max_items: u64,
+    excluded_apps: &[String],
+  ) {
     smol::block_on(async {
       log::info!("Starting clipboard watch daemon");
 
@@ -46,10 +56,10 @@ impl WatchCommand for SqliteClipboardDb {
 
             // Only store if changed and not empty
             if !buf.is_empty() && (last_contents.as_ref() != Some(&buf)) {
-              last_contents = Some(std::mem::take(&mut buf));
+              let new_contents = std::mem::take(&mut buf);
               let mime = Some(mime_type.to_string());
               let entry = Entry {
-                contents: last_contents.as_ref().unwrap().clone(),
+                contents: new_contents.clone(),
                 mime,
               };
               let id = self.next_sequence();
@@ -57,13 +67,27 @@ impl WatchCommand for SqliteClipboardDb {
                 &entry.contents[..],
                 max_dedupe_search,
                 max_items,
+                Some(excluded_apps),
               ) {
-                Ok(_) => log::info!("Stored new clipboard entry (id: {id})"),
-                Err(e) => log::error!("Failed to store clipboard entry: {e}"),
+                Ok(_) => {
+                  log::info!("Stored new clipboard entry (id: {id})");
+                  last_contents = Some(new_contents);
+                },
+                Err(crate::db::StashError::ExcludedByApp(_)) => {
+                  log::info!("Clipboard entry excluded by app filter");
+                  last_contents = Some(new_contents);
+                },
+                Err(crate::db::StashError::Store(ref msg))
+                  if msg.contains("Excluded by app filter") =>
+                {
+                  log::info!("Clipboard entry excluded by app filter");
+                  last_contents = Some(new_contents);
+                },
+                Err(e) => {
+                  log::error!("Failed to store clipboard entry: {e}");
+                  last_contents = Some(new_contents);
+                },
               }
-
-              // Drop clipboard contents after storing
-              last_contents = None;
             }
           },
           Err(e) => {
