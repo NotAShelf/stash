@@ -1,3 +1,33 @@
-target/
-.direnv/
-result/
+# Ignore everything by default
+/*
+!/
+
+!/nix
+!/src
+!/vendor
+
+# Rust/Cargo
+!/Cargo.lock
+!/Cargo.toml
+
+# Configuration files
+!/.config/
+!/.rustfmt.toml
+!/.clippy.toml
+!/.taplo.toml
+!/.gitattributes
+!/.gitignore
+!/.github
+!/.editorconfig
+
+# Nix
+!/flake/**/*.nix
+!/flake.nix
+!/flake.lock
+!/shell.nix
+!/default.nix
+!/.envrc
+
+# Misc
+!/README.md
+!/LICENSE
