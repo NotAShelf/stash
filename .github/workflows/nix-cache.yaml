@@ -13,7 +13,7 @@ jobs:
   populate-cache:
     runs-on: ubuntu-latest
     steps:
-      - name: "CHeckout"
+      - name: "Checkout"
         uses: actions/checkout@v5
 
       - uses: cachix/install-nix-action@v31
@@ -25,4 +25,5 @@ jobs:
           name: nyx
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
-      - run: nix build
+      - name: "Build with Nix"
+        run: nix build

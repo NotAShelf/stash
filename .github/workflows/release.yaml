@@ -9,7 +9,26 @@ permissions:
   contents: write
 
 jobs:
+  tag-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Read version
+        run: |
+          echo -n "stash_version=v" >> "$GITHUB_ENV"
+          nix run nixpkgs#fq -- -r '.package.version' Cargo.toml >> "$GITHUB_ENV"
+          cat "$GITHUB_ENV"
+
+      - name: Tag
+        run: |
+          set -x
+          git tag $ndg_version
+          git push --tags || :
+
   create-release:
+    needs: tag-release
     runs-on: ubuntu-latest
     outputs:
       upload_url: ${{ steps.create_release.outputs.upload_url }}
