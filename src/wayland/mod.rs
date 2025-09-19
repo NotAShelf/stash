@@ -163,6 +163,12 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for AppState {
           }
         }
       },
+      zwlr_foreign_toplevel_handle_v1::Event::Closed => {
+        // Clean up when toplevel is closed
+        if let Ok(mut apps) = TOPLEVEL_APPS.lock() {
+          apps.remove(&handle_id);
+        }
+      },
       _ => {},
     }
   }
