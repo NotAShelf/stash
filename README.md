@@ -48,6 +48,7 @@ features such as but not limited to:
 - Text previews with customizable width
 - Automatic clipboard monitoring with `stash watch`
 - Sensitive clipboard filtering via regex (see below)
+- Sensitive clipboard flitering by application (see below)
 
 See [usage section](#usage) for more details.
 
@@ -179,35 +180,65 @@ commands `--help` text for more details. The following are generally standard:
 - `--preview-width <N>`: Text preview max width for `list`
 - `--version`: Print the current version and exit
 
-#### Sensitive Clipboard Filtering
+### Sensitive Clipboard Filtering
 
 Stash can be configured to avoid storing clipboard entries that match a
 sensitive pattern, using a regular expression. This is useful for preventing
 accidental storage of secrets, passwords, or other sensitive data. You don't
 want sensitive data ending up in your persistent clipboard, right?
 
-The filter can be configured in one of two ways:
+The filter can be configured in one of three ways, as part of two separate
+features.
 
-- **Environment variable**: Set `STASH_SENSITIVE_REGEX` to a valid regex
-  pattern. If clipboard text matches, it will not be stored.
-- **Systemd LoadCredential**: If running as a service, you can provide a regex
-  pattern via a credential file. For example, add to your `stash.service`:
+#### Clipboard Filtering by Entry Regex
 
-  ```ini
-  LoadCredential=clipboard_filter:/etc/stash/clipboard_filter
-  ```
+This can be configured in one of two ways. You can use the **environment
+variable** `STASTH_SENSITIVE_REGEX` to a valid regex pattern, and if the
+clipboard text matches the regex it will not be stored. This can be used for
+trivial secrets such as but not limited to GitHub tokens or secrets that follow
+a rule, e.g. a prefix.
 
-  The file `/etc/stash/clipboard_filter` should contain your regex pattern (no
-  quotes). This is done automatically in the vendored Systemd service. Remember
-  to set the appropriate file permissions if using this option.
+The safer alternative to this is using **Systemd LoadCrediental**. If Stash is
+running as a Systemd service, you can provide a regex pattern using a crediental
+file. For example, add to your `stash.service`:
+
+```dosini
+LoadCredential=clipboard_filter:/etc/stash/clipboard_filter
+```
+
+The file `/etc/stash/clipboard_filter` should contain your regex pattern (no
+quotes). This is done automatically in the vendored Systemd service. Remember to
+set the appropriate file permissions if using this option.
 
 The service will check the credential file first, then the environment variable.
 If a clipboard entry matches the regex, it will be skipped and a warning will be
 logged.
 
-**Example regex to block common password patterns**:
+> [!TIP]
+> **Example regex to block common password patterns**:
+>
+> `(password|secret|api[_-]?key|token)[=: ]+[^\s]+`
 
-- `(password|secret|api[_-]?key|token)[=: ]+[^\s]+`
+#### Clipboard Filtering by Application Class
+
+Stash allows blocking an entry from the persistent history if it has been copied
+from certain applications. This depends on the `use-toplevel` feature flag and
+uses the the `wlr-foreign-toplevel-management-v1` protocol for precise focus
+detection. While this feature flag is enabled (the default) you may use
+`--excluded-apps` in, e.g., `stash watch` or set the `STASH_EXCLUDED_APPS`
+environment variable to block entries from persisting in the database if they
+are coming from your password manager for example. The entry is still copied to
+the clipboard, but it will never be put inside the database.
+
+This is a more robust alternative to using the regex method above, since you
+likely do not want to catch your passwords with a regex. Simply pass your
+password manager's **window class** to `--excluded-apps` and your passwords will
+be only copied to the clipboard.
+
+> [!TIP]
+> **Example startup command for Stash daemon**:
+>
+> `stash --excluded-apps Bitwarden watch`
 
 ## Tips & Tricks
 
