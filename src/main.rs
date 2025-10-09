@@ -110,7 +110,7 @@ enum Command {
     ask: bool,
   },
 
-  /// Watch clipboard for changes and store automatically
+  /// Start a process to watch clipboard for changes and store automatically.
   Watch,
 }
 
