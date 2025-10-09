@@ -5,13 +5,13 @@
 </h1>
 
 <div align="center">
-    <a alt="CI" href="https://github.com/NotAShelf/stash/actions">
+    <a alt="CI Status" href="https://github.com/NotAShelf/stash/actions">
         <img
           src="https://github.com/NotAShelf/stash/actions/workflows/rust.yml/badge.svg"
           alt="Build Status"
         />
     </a>
-    <a alt="Dopendencies" href="https://deps.rs/repo/github/notashelf/stash">
+    <a alt="Dependencies" href="https://deps.rs/repo/github/notashelf/stash">
         <img
           src="https://deps.rs/repo/github/notashelf/stash/status.svg"
           alt="Dependency Status"
@@ -44,11 +44,12 @@ features such as but not limited to:
 - Backwards compatible with Cliphist TSV format
   - Import clipboard history from TSV (e.g., from `cliphist list`)
 - Image preview (shows dimensions and format)
-- Deduplication and entry limit control
 - Text previews with customizable width
+- Deduplication and entry limit control
 - Automatic clipboard monitoring with `stash watch`
+- Drop-in replacement for `wl-clipboard` tools (`wl-copy` and `wl-paste`)
 - Sensitive clipboard filtering via regex (see below)
-- Sensitive clipboard flitering by application (see below)
+- Sensitive clipboard filtering by application (see below)
 
 See [usage section](#usage) for more details.
 
@@ -169,6 +170,14 @@ automatically. This is designed as an alternative to shelling out to
 premade Systemd service in `vendor/`. Packagers are encouraged to vendor the
 service unless adding their own.
 
+> [!TIP]
+> Stash provides `wl-copy` and `wl-paste` binaries for backwards compatibility
+> with the `wl-clipboard` tools. If _must_ depend on those binaries by name, you
+> may simply use the `wl-copy` and `wl-paste` provided as `wl-clipboard-rs`
+> wrappers on your system. In other words, you can use
+> `wl-paste --watch stash store` as an alternative to `stash watch` if
+> preferred.
+
 ### Options
 
 Some commands take additional flags to modify Stash's behavior. See each
@@ -263,7 +272,7 @@ should know.
 - Stash adds a `watch` command to automatically store clipboard changes. This is
   an alternative to `wl-paste --watch cliphist list`. You can avoid shelling out
   and depending on `wl-paste` as Stash implements it through `wl-clipboard-rs`
-  crate.
+  crate and provides its own `wl-copy` and `wl-paste` binaries.
 
 ### TSV Export and Import
 
@@ -316,3 +325,9 @@ figured out something new, e.g. a neat shell trick, feel free to add it here!
    ```bash
    cliphist list --db ~/.cache/cliphist/db | stash import
    ```
+
+## License
+
+This project is made available under Mozilla Public License (MPL) version 2.0.
+See [LICENSE](LICENSE) for more details on the exact conditions. An online copy
+is provided [here](https://www.mozilla.org/en-US/MPL/2.0/).
