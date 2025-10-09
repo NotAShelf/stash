@@ -26,7 +26,14 @@ impl SqliteClipboardDb {
     use std::io::stdout;
 
     use crossterm::{
-      event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+      event::{
+        self,
+        DisableMouseCapture,
+        EnableMouseCapture,
+        Event,
+        KeyCode,
+        KeyModifiers,
+      },
       execute,
       terminal::{
         EnterAlternateScreen,
@@ -35,6 +42,7 @@ impl SqliteClipboardDb {
         enable_raw_mode,
       },
     };
+    use notify_rust::Notification;
     use ratatui::{
       Terminal,
       backend::CrosstermBackend,
@@ -42,6 +50,7 @@ impl SqliteClipboardDb {
       text::{Line, Span},
       widgets::{Block, Borders, List, ListItem, ListState},
     };
+    use wl_clipboard_rs::copy::{MimeType, Options, Source};
 
     // Query entries from DB
     let mut stmt = self
@@ -97,7 +106,10 @@ impl SqliteClipboardDb {
           .draw(|f| {
             let area = f.area();
             let block = Block::default()
-              .title("Clipboard Entries (j/k/↑/↓ to move, q/ESC to quit)")
+              .title(
+                "Clipboard Entries (j/k/↑/↓ to move, Enter to copy, Shift+D \
+                 to delete, q/ESC to quit)",
+              )
               .borders(Borders::ALL);
 
             let border_width = 2;
@@ -234,9 +246,9 @@ impl SqliteClipboardDb {
           if let Event::Key(key) = event::read()
             .map_err(|e| StashError::ListDecode(e.to_string().into()))?
           {
-            match key.code {
-              KeyCode::Char('q') | KeyCode::Esc => break,
-              KeyCode::Down | KeyCode::Char('j') => {
+            match (key.code, key.modifiers) {
+              (KeyCode::Char('q') | KeyCode::Esc, _) => break,
+              (KeyCode::Down | KeyCode::Char('j'), _) => {
                 let i = match state.selected() {
                   Some(i) => {
                     if i >= entries.len() - 1 {
@@ -249,7 +261,7 @@ impl SqliteClipboardDb {
                 };
                 state.select(Some(i));
               },
-              KeyCode::Up | KeyCode::Char('k') => {
+              (KeyCode::Up | KeyCode::Char('k'), _) => {
                 let i = match state.selected() {
                   Some(i) => {
                     if i == 0 {
@@ -261,6 +273,79 @@ impl SqliteClipboardDb {
                   None => 0,
                 };
                 state.select(Some(i));
+              },
+              (KeyCode::Enter, _) => {
+                if let Some(idx) = state.selected() {
+                  if let Some((id, ..)) = entries.get(idx) {
+                    // Fetch full contents for the selected entry
+                    let (contents, mime): (Vec<u8>, Option<String>) = self
+                      .conn
+                      .query_row(
+                        "SELECT contents, mime FROM clipboard WHERE id = ?1",
+                        rusqlite::params![id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                      )
+                      .map_err(|e| {
+                        StashError::ListDecode(e.to_string().into())
+                      })?;
+                    // Copy to clipboard
+                    let opts = Options::new();
+                    // Default clipboard is regular, seat is default
+                    let mime_type = match mime {
+                      Some(ref m) if m == "text/plain" => MimeType::Text,
+                      Some(ref m) => MimeType::Specific(m.clone()),
+                      None => MimeType::Text,
+                    };
+                    let copy_result = opts
+                      .copy(Source::Bytes(contents.clone().into()), mime_type);
+                    match copy_result {
+                      Ok(()) => {
+                        let _ = Notification::new()
+                          .summary("Stash")
+                          .body("Copied entry to clipboard")
+                          .show();
+                      },
+                      Err(e) => {
+                        log::error!("Failed to copy entry to clipboard: {e}");
+                        let _ = Notification::new()
+                          .summary("Stash")
+                          .body(&format!("Failed to copy to clipboard: {e}"))
+                          .show();
+                      },
+                    }
+                  }
+                }
+              },
+              (KeyCode::Char('D'), KeyModifiers::SHIFT) => {
+                if let Some(idx) = state.selected() {
+                  if let Some((id, ..)) = entries.get(idx) {
+                    // Delete entry from DB
+                    self
+                      .conn
+                      .execute(
+                        "DELETE FROM clipboard WHERE id = ?1",
+                        rusqlite::params![id],
+                      )
+                      .map_err(|e| {
+                        StashError::DeleteEntry(*id, e.to_string().into())
+                      })?;
+                    // Remove from entries and update selection
+                    entries.remove(idx);
+                    let new_len = entries.len();
+                    if new_len == 0 {
+                      state.select(None);
+                    } else if idx >= new_len {
+                      state.select(Some(new_len - 1));
+                    } else {
+                      state.select(Some(idx));
+                    }
+                    // Show notification
+                    let _ = Notification::new()
+                      .summary("Stash")
+                      .body("Deleted entry")
+                      .show();
+                  }
+                }
               },
               _ => {},
             }
