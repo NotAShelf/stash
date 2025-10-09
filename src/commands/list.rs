@@ -296,13 +296,22 @@ impl SqliteClipboardDb {
                       Some(ref m) => MimeType::Specific(m.clone()),
                       None => MimeType::Text,
                     };
-                    let _ = opts
+                    let copy_result = opts
                       .copy(Source::Bytes(contents.clone().into()), mime_type);
-                    // Show notification
-                    let _ = Notification::new()
-                      .summary("Stash")
-                      .body("Copied entry to clipboard")
-                      .show();
+                    match copy_result {
+                      Ok(()) => {
+                        let _ = Notification::new()
+                          .summary("Stash")
+                          .body("Copied entry to clipboard")
+                          .show();
+                      },
+                      Err(e) => {
+                        let _ = Notification::new()
+                          .summary("Stash")
+                          .body(&format!("Failed to copy entry: {e}"))
+                          .show();
+                      },
+                    }
                   }
                 }
               },
