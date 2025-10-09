@@ -1,6 +1,8 @@
 {
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs?ref=nixos-unstable";
-  inputs.crane.url = "github:ipetkov/crane";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs?ref=nixos-unstable";
+    crane.url = "github:ipetkov/crane";
+  };
 
   outputs = {
     self,
@@ -11,10 +13,11 @@
     forEachSystem = nixpkgs.lib.genAttrs systems;
     pkgsForEach = nixpkgs.legacyPackages;
   in {
-    packages = forEachSystem (system: {
-      default = pkgsForEach.${system}.callPackage ./nix/package.nix {
-        craneLib = crane.mkLib pkgsForEach.${system};
-      };
+    packages = forEachSystem (system: let
+      craneLib = crane.mkLib pkgsForEach.${system};
+    in {
+      stash = pkgsForEach.${system}.callPackage ./nix/package.nix {inherit craneLib;};
+      default = self.packages.${system}.stash;
     });
 
     devShells = forEachSystem (system: {
