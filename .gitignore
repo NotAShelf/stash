@@ -9,6 +9,7 @@
 # Rust/Cargo
 !/Cargo.lock
 !/Cargo.toml
+!/build.rs
 
 # Configuration files
 !/.config/

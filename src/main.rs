@@ -10,6 +10,7 @@ use inquire::Confirm;
 
 mod commands;
 mod db;
+mod multicall;
 #[cfg(feature = "use-toplevel")] mod wayland;
 
 use crate::commands::{
@@ -129,6 +130,13 @@ fn report_error<T>(
 
 #[allow(clippy::too_many_lines)] // whatever
 fn main() {
+   // Multicall dispatch: stash-copy, stash-paste, wl-copy, wl-paste
+  if crate::multicall::multicall_dispatch() {
+    // If handled, exit immediately
+    std::process::exit(0);
+  }
+
+  // If not multicall, proceed with normal CLI handling
   smol::block_on(async {
     let cli = Cli::parse();
     env_logger::Builder::new()
