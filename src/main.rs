@@ -130,7 +130,7 @@ fn report_error<T>(
 
 #[allow(clippy::too_many_lines)] // whatever
 fn main() {
-   // Multicall dispatch: stash-copy, stash-paste, wl-copy, wl-paste
+  // Multicall dispatch: stash-copy, stash-paste, wl-copy, wl-paste
   if crate::multicall::multicall_dispatch() {
     // If handled, exit immediately
     std::process::exit(0);

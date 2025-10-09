@@ -92,23 +92,23 @@ fn multicall_stash_copy() {
   if args.check_primary {
     match is_primary_selection_supported() {
       Ok(true) => {
-        log::info!("Primary selection is supported.");
+        log::info!("primary selection is supported.");
         std::process::exit(0);
       },
       Ok(false) => {
-        log::info!("Primary selection is NOT supported.");
+        log::info!("primary selection is NOT supported.");
         std::process::exit(1);
       },
       Err(PrimarySelectionCheckError::NoSeats) => {
-        log::error!("Could not determine: no seats available.");
+        log::error!("could not determine: no seats available.");
         std::process::exit(2);
       },
       Err(PrimarySelectionCheckError::MissingProtocol) => {
-        log::error!("Data-control protocol not supported by compositor.");
+        log::error!("data-control protocol not supported by compositor.");
         std::process::exit(3);
       },
       Err(e) => {
-        log::error!("Error checking primary selection support: {e}");
+        log::error!("error checking primary selection support: {e}");
         std::process::exit(4);
       },
     }
@@ -135,7 +135,7 @@ fn multicall_stash_copy() {
   let mut input: Vec<u8> = Vec::new();
   if args.text.is_empty() {
     if let Err(e) = std::io::stdin().read_to_end(&mut input) {
-      eprintln!("stash-copy: failed to read stdin: {e}");
+      eprintln!("failed to read stdin: {e}");
       std::process::exit(1);
     }
   } else {
@@ -153,8 +153,7 @@ fn multicall_stash_copy() {
   }
   if let Some(seat) = args.seat.as_deref() {
     log::debug!(
-      "stash-copy: --seat is not supported by stash (using default seat: \
-       {seat})"
+      "'--seat' is not supported by stash (using default seat: {seat})"
     );
   }
   if args.omit_additional_text_mime_types {
@@ -170,13 +169,13 @@ fn multicall_stash_copy() {
   if args.clear {
     // Clear clipboard by setting empty contents
     if let Err(e) = opts.copy(Source::Bytes(Vec::new().into()), mime_type) {
-      log::error!("stash-copy: failed to clear clipboard: {e}");
+      log::error!("failed to clear clipboard: {e}");
       std::process::exit(1);
     }
     return;
   }
   if let Err(e) = opts.copy(Source::Bytes(input.into()), mime_type) {
-    log::error!("stash-copy: failed to copy to clipboard: {e}");
+    log::error!("failed to copy to clipboard: {e}");
     std::process::exit(1);
   }
 }
@@ -220,19 +219,18 @@ fn multicall_stash_paste() {
 
   if let Some(seat) = args.seat.as_deref() {
     log::debug!(
-      "stash-paste: --seat is not supported by stash (using default seat: \
-       {seat})"
+      "'--seat' is not supported by stash (using default seat: {seat})"
     );
   }
 
   if args.list_types {
     match get_contents(clipboard, Seat::Unspecified, MimeType::Text) {
       Ok((_reader, available_types)) => {
-        print!("{available_types}");
+        log::info!("{available_types}");
         std::process::exit(0);
       },
       Err(e) => {
-        log::error!("stash-paste: failed to list types: {e}");
+        log::error!("failed to list types: {e}");
         std::process::exit(1);
       },
     }
@@ -258,15 +256,13 @@ fn multicall_stash_paste() {
           }
         },
         Err(e) => {
-          log::error!("stash-paste: failed to read clipboard: {e}");
+          log::error!("failed to read clipboard: {e}");
           std::process::exit(1);
         },
       }
     },
     Err(Error::NoSeats) => {
-      log::error!(
-        "stash-paste: no seats available (is a Wayland compositor running?)"
-      );
+      log::error!("no seats available (is a Wayland compositor running?)");
       std::process::exit(1);
     },
     Err(Error::ClipboardEmpty) => {
@@ -275,13 +271,11 @@ fn multicall_stash_paste() {
       }
     },
     Err(Error::NoMimeType) => {
-      log::error!(
-        "stash-paste: clipboard does not contain requested MIME type"
-      );
+      log::error!("clipboard does not contain requested MIME type");
       std::process::exit(1);
     },
     Err(e) => {
-      log::error!("stash-paste: clipboard error: {e}");
+      log::error!("clipboard error: {e}");
       std::process::exit(1);
     },
   }
