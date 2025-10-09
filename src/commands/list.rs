@@ -306,9 +306,10 @@ impl SqliteClipboardDb {
                           .show();
                       },
                       Err(e) => {
+                        log::error!("Failed to copy entry to clipboard: {e}");
                         let _ = Notification::new()
                           .summary("Stash")
-                          .body(&format!("Failed to copy entry: {e}"))
+                          .body(&format!("Failed to copy to clipboard: {e}"))
                           .show();
                       },
                     }
