@@ -1,10 +1,10 @@
-name: "Populate cachix cache"
+name: Build and Cache with Nix
 
 on:
   workflow_dispatch:
   push:
     branches: [ "main" ]
-    paths: [ 'src/**.rs', 'Cargo.toml', 'Cargo.lock', 'nix/package.nix' ]
+    paths: [ 'src/**.rs', 'build.rs',  'Cargo.toml', 'Cargo.lock', 'nix/package.nix', 'flake.nix', 'flake.lock' ]
 
 permissions:
   contents: read
