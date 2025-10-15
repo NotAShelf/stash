@@ -13,6 +13,11 @@
     forEachSystem = nixpkgs.lib.genAttrs systems;
     pkgsForEach = nixpkgs.legacyPackages;
   in {
+    nixosModules = {
+      stash = import ./nix/modules/nixos.nix self;
+      default = self.nixosModules.stash;
+    };
+
     packages = forEachSystem (system: let
       craneLib = crane.mkLib pkgsForEach.${system};
     in {
