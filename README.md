@@ -167,7 +167,7 @@ stash watch
 This runs a daemon that monitors the clipboard and stores new entries
 automatically. This is designed as an alternative to shelling out to
 `wl-paste --watch` inside a Systemd service or XDG autostart. You may find a
-premade Systemd service in `vendor/`. Packagers are encouraged to vendor the
+premade Systemd service in `contrib/`. Packagers are encouraged to vendor the
 service unless adding their own.
 
 > [!TIP]
@@ -216,8 +216,9 @@ LoadCredential=clipboard_filter:/etc/stash/clipboard_filter
 ```
 
 The file `/etc/stash/clipboard_filter` should contain your regex pattern (no
-quotes). This is done automatically in the vendored Systemd service. Remember to
-set the appropriate file permissions if using this option.
+quotes). This is done automatically in the
+[vendored Systemd service](./contrib/stash.service). Remember to set the
+appropriate file permissions if using this option.
 
 The service will check the credential file first, then the environment variable.
 If a clipboard entry matches the regex, it will be skipped and a warning will be
