@@ -1,6 +1,8 @@
 {
   lib,
   craneLib,
+  stdenv,
+  mold,
   versionCheckHook,
 }: let
   pname = "stash";
@@ -51,6 +53,11 @@ in
         [ -x "$out/bin/$bin" ] || { echo "$bin missing"; exit 1; }
       done
     '';
+
+    env = lib.optionalAttrs (stdenv.isLinux && !stdenv.hostPlatform.isAarch) {
+      CARGO_LINKER = "clang";
+      CARGO_RUSTFLAGS = "-Clink-arg=-fuse-ld=${mold}/bin/mold";
+    };
 
     meta = {
       description = "Wayland clipboard manager with fast persistent history and multi-media support";
