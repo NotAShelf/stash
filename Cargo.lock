@@ -1521,6 +1521,7 @@ dependencies = [
  "env_logger",
  "imagesize",
  "inquire",
+ "libc",
  "log",
  "notify-rust",
  "ratatui",
