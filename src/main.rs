@@ -2,7 +2,6 @@ use std::{
   env,
   io::{self, IsTerminal},
   path::PathBuf,
-  process,
 };
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -129,14 +128,27 @@ fn report_error<T>(
 }
 
 #[allow(clippy::too_many_lines)] // whatever
-fn main() {
-  // Multicall dispatch: stash-copy, stash-paste, wl-copy, wl-paste
-  if crate::multicall::multicall_dispatch() {
-    // If handled, exit immediately
-    std::process::exit(0);
+fn main() -> color_eyre::eyre::Result<()> {
+  // Check if we're being called as a multicall binary
+  let program_name = env::args().next().map(|s| {
+    PathBuf::from(s)
+      .file_name()
+      .and_then(|name| name.to_str())
+      .unwrap_or("stash")
+      .to_string()
+  });
+
+  if let Some(ref name) = program_name {
+    if name == "wl-copy" || name == "stash-copy" {
+      crate::multicall::wl_copy::wl_copy_main()?;
+      return Ok(());
+    } else if name == "wl-paste" || name == "stash-paste" {
+      crate::multicall::wl_paste::wl_paste_main()?;
+      return Ok(());
+    }
   }
 
-  // If not multicall, proceed with normal CLI handling
+  // Normal CLI handling
   smol::block_on(async {
     let cli = Cli::parse();
     env_logger::Builder::new()
@@ -151,24 +163,11 @@ fn main() {
     });
 
     if let Some(parent) = db_path.parent() {
-      if let Err(e) = std::fs::create_dir_all(parent) {
-        log::error!("Failed to create database directory: {e}");
-        process::exit(1);
-      }
+      std::fs::create_dir_all(parent)?;
     }
 
-    let conn = rusqlite::Connection::open(&db_path).unwrap_or_else(|e| {
-      log::error!("Failed to open SQLite database: {e}");
-      process::exit(1);
-    });
-
-    let db = match db::SqliteClipboardDb::new(conn) {
-      Ok(db) => db,
-      Err(e) => {
-        log::error!("Failed to initialize SQLite database: {e}");
-        process::exit(1);
-      },
-    };
+    let conn = rusqlite::Connection::open(&db_path)?;
+    let db = db::SqliteClipboardDb::new(conn)?;
 
     match cli.command {
       Some(Command::Store) => {
@@ -345,12 +344,12 @@ fn main() {
           &[],
         );
       },
+
       None => {
-        if let Err(e) = Cli::command().print_help() {
-          log::error!("Failed to print help: {e}");
-        }
+        Cli::command().print_help()?;
         println!();
       },
     }
-  });
+    Ok(())
+  })
 }
