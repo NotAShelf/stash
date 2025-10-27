@@ -45,7 +45,7 @@ struct Cli {
   preview_width: u32,
 
   /// Path to the `SQLite` clipboard database file.
-  #[arg(long)]
+  #[arg(long, env = "STASH_DB_PATH")]
   db_path: Option<PathBuf>,
 
   /// Application names to exclude from clipboard history
@@ -183,7 +183,7 @@ fn main() -> color_eyre::eyre::Result<()> {
             #[cfg(not(feature = "use-toplevel"))]
             &[],
           ),
-          "Failed to store entry",
+          "failed to store entry",
         );
       },
       Some(Command::List { format }) => {
@@ -191,7 +191,7 @@ fn main() -> color_eyre::eyre::Result<()> {
           Some("tsv") => {
             report_error(
               db.list(io::stdout(), cli.preview_width),
-              "Failed to list entries",
+              "failed to list entries",
             );
           },
           Some("json") => {
@@ -200,23 +200,23 @@ fn main() -> color_eyre::eyre::Result<()> {
                 println!("{json}");
               },
               Err(e) => {
-                log::error!("Failed to list entries as JSON: {e}");
+                log::error!("failed to list entries as JSON: {e}");
               },
             }
           },
           Some(other) => {
-            log::error!("Unsupported format: {other}");
+            log::error!("unsupported format: {other}");
           },
           None => {
             if std::io::stdout().is_terminal() {
               report_error(
                 db.list_tui(cli.preview_width),
-                "Failed to list entries in TUI",
+                "failed to list entries in TUI",
               );
             } else {
               report_error(
                 db.list(io::stdout(), cli.preview_width),
-                "Failed to list entries",
+                "failed to list entries",
               );
             }
           },
@@ -225,7 +225,7 @@ fn main() -> color_eyre::eyre::Result<()> {
       Some(Command::Decode { input }) => {
         report_error(
           db.decode(io::stdin(), io::stdout(), input),
-          "Failed to decode entry",
+          "failed to decode entry",
         );
       },
       Some(Command::Delete { arg, r#type, ask }) => {
@@ -238,7 +238,7 @@ fn main() -> color_eyre::eyre::Result<()> {
               .unwrap_or(false);
 
           if !should_proceed {
-            log::info!("Aborted by user.");
+            log::info!("aborted by user.");
           }
         }
         if should_proceed {
@@ -251,13 +251,13 @@ fn main() -> color_eyre::eyre::Result<()> {
                   "Failed to delete entry by id",
                 );
               } else {
-                log::error!("Argument is not a valid id");
+                log::error!("argument is not a valid id");
               }
             },
             (Some(s), Some("query")) => {
               report_error(
                 db.query_delete(&s),
-                "Failed to delete entry by query",
+                "failed to delete entry by query",
               );
             },
             (Some(s), None) => {
@@ -265,23 +265,23 @@ fn main() -> color_eyre::eyre::Result<()> {
                 use std::io::Cursor;
                 report_error(
                   db.delete(Cursor::new(format!("{id}\n"))),
-                  "Failed to delete entry by id",
+                  "failed to delete entry by id",
                 );
               } else {
                 report_error(
                   db.query_delete(&s),
-                  "Failed to delete entry by query",
+                  "failed to delete entry by query",
                 );
               }
             },
             (None, _) => {
               report_error(
                 db.delete(io::stdin()),
-                "Failed to delete entry from stdin",
+                "failed to delete entry from stdin",
               );
             },
             (_, Some(_)) => {
-              log::error!("Unknown type for --type. Use \"id\" or \"query\".");
+              log::error!("unknown type for --type. Use \"id\" or \"query\".");
             },
           }
         }
@@ -296,11 +296,11 @@ fn main() -> color_eyre::eyre::Result<()> {
           .prompt()
           .unwrap_or(false);
           if !should_proceed {
-            log::info!("Aborted by user.");
+            log::info!("wipe command aborted by user.");
           }
         }
         if should_proceed {
-          report_error(db.wipe(), "Failed to wipe database");
+          report_error(db.wipe(), "failed to wipe database");
         }
       },
 
@@ -315,7 +315,7 @@ fn main() -> color_eyre::eyre::Result<()> {
           .prompt()
           .unwrap_or(false);
           if !should_proceed {
-            log::info!("Aborted by user.");
+            log::info!("import command aborted by user.");
           }
         }
         if should_proceed {
@@ -325,11 +325,11 @@ fn main() -> color_eyre::eyre::Result<()> {
               if let Err(e) =
                 ImportCommand::import_tsv(&db, io::stdin(), cli.max_items)
               {
-                log::error!("Failed to import TSV: {e}");
+                log::error!("failed to import TSV: {e}");
               }
             },
             _ => {
-              log::error!("Unsupported import format: {format}");
+              log::error!("unsupported import format: {format}");
             },
           }
         }
