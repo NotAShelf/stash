@@ -52,96 +52,115 @@ fn get_contents(
   types_preferred: &[String],
   detection_smart: bool,
 ) -> Result<(Box<dyn std::io::Read>, String), Box<dyn std::error::Error>> {
+  log::debug!(
+    "attempted to get clipboard contents with \
+     smart_detection={detection_smart}, preferred_types={types_preferred:?}"
+  );
+
   if !types_preferred.is_empty() && detection_smart {
-    match get_mime_types(clipboard, seat) {
-      Ok(types) => {
-        for preferred in types_preferred {
-          // Handle wildcards (e.g., "image/*")
-          if preferred.ends_with("/*") {
-            let prefix = &preferred[..preferred.len() - 2];
-            for mime_type in &types {
-              if mime_type.starts_with(prefix) {
-                let mime_str = mime_type.clone();
-                let (reader, _) = wl_get_contents(
-                  clipboard,
-                  seat,
-                  MimeType::Specific(&mime_str),
-                )?;
-                return Ok((
-                  Box::new(reader) as Box<dyn std::io::Read>,
-                  mime_str,
-                ));
-              }
-            }
-          } else {
-            // Exact match
-            if types.contains(preferred) {
+    log::debug!("querying available mime types with user preferences");
+    if let Ok(types) = get_mime_types(clipboard, seat) {
+      log::debug!("Available MIME types: {types:?}");
+      log::debug!("trying user preferred types in order: {types_preferred:?}");
+
+      for preferred in types_preferred {
+        // Handle wildcards (e.g., "image/*")
+        if preferred.ends_with("/*") {
+          let prefix = &preferred[..preferred.len() - 2];
+          for mime_type in &types {
+            if mime_type.starts_with(prefix) {
+              let mime_str = mime_type.clone();
               let (reader, _) = wl_get_contents(
                 clipboard,
                 seat,
-                MimeType::Specific(preferred),
+                MimeType::Specific(&mime_str),
               )?;
               return Ok((
                 Box::new(reader) as Box<dyn std::io::Read>,
-                preferred.clone(),
+                mime_str,
               ));
             }
           }
+          log::warn!("no matches found for wildcard pattern '{preferred}'");
+        } else {
+          // Exact match
+          if types.contains(preferred) {
+            log::debug!("selected MIME type '{preferred}' (exact match)");
+            let (reader, _) =
+              wl_get_contents(clipboard, seat, MimeType::Specific(preferred))?;
+            return Ok((
+              Box::new(reader) as Box<dyn std::io::Read>,
+              preferred.clone(),
+            ));
+          }
+          log::info!("exact match '{preferred}' not found in available types");
         }
-      },
-      Err(_) => {
-        // Fall back to regular behavior if mime type query fails
-      },
+      }
+      log::warn!(
+        "none of the preferred types matched available types, falling back to \
+         default priority"
+      );
+    } else {
+      // Fall back to regular behavior if mime type query fails
+      log::warn!("failed to query available MIME types, falling back to Any");
     }
   } else if detection_smart {
     // Default for "smart" detection:
     // prioritize images > text/plain > other text > other
     // It is as smart as I am, and to be honest, that's not very smart
-    match get_mime_types(clipboard, seat) {
-      Ok(types) => {
-        // Priority order: images > text/plain > other text > other
-        for mime_type in &types {
-          if mime_type.starts_with("image/") {
-            let mime_str = mime_type.clone();
-            let (reader, _) =
-              wl_get_contents(clipboard, seat, MimeType::Specific(&mime_str))?;
-            return Ok((Box::new(reader) as Box<dyn std::io::Read>, mime_str));
-          }
-        }
+    if let Ok(types) = get_mime_types(clipboard, seat) {
+      log::debug!("available MIME types: {types:?}");
 
-        if types.contains("text/plain") {
-          let (reader, _) = wl_get_contents(clipboard, seat, MimeType::Text)?;
-          return Ok((
-            Box::new(reader) as Box<dyn std::io::Read>,
-            "text/plain".to_string(),
-          ));
-        }
-
-        for mime_type in &types {
-          if mime_type.starts_with("text/") {
-            let mime_str = mime_type.clone();
-            let (reader, _) =
-              wl_get_contents(clipboard, seat, MimeType::Specific(&mime_str))?;
-            return Ok((Box::new(reader) as Box<dyn std::io::Read>, mime_str));
-          }
-        }
-
-        // Fallback to first available
-        if let Some(first_type) = types.iter().next() {
-          let mime_str = first_type.clone();
+      // Priority order: images > text/plain > other text > other
+      for mime_type in &types {
+        if mime_type.starts_with("image/") {
+          let mime_str = mime_type.clone();
           let (reader, _) =
             wl_get_contents(clipboard, seat, MimeType::Specific(&mime_str))?;
           return Ok((Box::new(reader) as Box<dyn std::io::Read>, mime_str));
         }
-      },
-      Err(_) => {
-        // Fall back to regular behavior if mime type query fails
-      },
+      }
+
+      log::debug!("no image formats found, checking for text/plain");
+      if types.contains("text/plain") {
+        let (reader, _) = wl_get_contents(clipboard, seat, MimeType::Text)?;
+        return Ok((
+          Box::new(reader) as Box<dyn std::io::Read>,
+          "text/plain".to_string(),
+        ));
+      }
+
+      log::debug!("no text/plain found, checking for other text formats");
+      for mime_type in &types {
+        if mime_type.starts_with("text/") {
+          let mime_str = mime_type.clone();
+          let (reader, _) =
+            wl_get_contents(clipboard, seat, MimeType::Specific(&mime_str))?;
+          return Ok((Box::new(reader) as Box<dyn std::io::Read>, mime_str));
+        }
+      }
+
+      // Fallback to first available
+      log::info!("no preferred formats found, using first available type");
+      if let Some(first_type) = types.iter().next() {
+        let mime_str = first_type.clone();
+        let (reader, _) =
+          wl_get_contents(clipboard, seat, MimeType::Specific(&mime_str))?;
+        return Ok((Box::new(reader) as Box<dyn std::io::Read>, mime_str));
+      }
+
+      log::warn!("no MIME types available from clipboard");
+    } else {
+      // Fall back to regular behavior if mime type query fails
+      log::warn!("failed to query available MIME types, falling back to Any");
     }
+  } else {
+    log::debug!("smart MIME detection is not enabled, using MimeType::Any");
   }
 
-  // Fallback to `Any` if smart detection is disabled or fails
+  // Fallback to Any if smart detection is disabled or fails
   let (reader, _) = wl_get_contents(clipboard, seat, MimeType::Any)?;
+  log::info!("selected MIME type 'application/octet-stream'");
   Ok((
     Box::new(reader) as Box<dyn std::io::Read>,
     "application/octet-stream".to_string(),
