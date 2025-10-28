@@ -23,7 +23,6 @@
   Lightweight Wayland clipboard "manager" with fast persistent history and
   robust multi-media support. Stores and previews clipboard entries (text, images)
   on the clipboard with a neat TUI and advanced scripting capabilities.
-  line.
 </div>
 
 <div align="center">
