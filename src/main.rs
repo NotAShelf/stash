@@ -99,10 +99,11 @@ enum Command {
     ask: bool,
   },
 
-  /// Import clipboard data from stdin (default: TSV format)
+  /// Import clipboard data from stdin
   Import {
-    /// Explicitly specify format: "tsv" (default)
-    #[arg(long, value_parser = ["tsv"])]
+    /// Type of the imported data. Only TSV is supported for the time being,
+    /// which is backwards compatible with Cliphist's export format.
+    #[arg(long, value_parser = ["tsv"], default_value = "tsv")]
     r#type: Option<String>,
 
     /// Ask for confirmation before importing
@@ -111,7 +112,12 @@ enum Command {
   },
 
   /// Start a process to watch clipboard for changes and store automatically.
-  Watch,
+  Watch {
+    /// Comma-separated list of MIME types to prioritize (e.g.,
+    /// "image/*,text/plain")
+    #[arg(long, value_delimiter = ',')]
+    types: Vec<String>,
+  },
 }
 
 fn report_error<T>(
@@ -334,7 +340,8 @@ fn main() -> color_eyre::eyre::Result<()> {
           }
         }
       },
-      Some(Command::Watch) => {
+
+      Some(Command::Watch { types }) => {
         db.watch(
           cli.max_dedupe_search,
           cli.max_items,
@@ -342,6 +349,7 @@ fn main() -> color_eyre::eyre::Result<()> {
           &cli.excluded_apps,
           #[cfg(not(feature = "use-toplevel"))]
           &[],
+          &types,
         );
       },
 
