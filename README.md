@@ -20,8 +20,9 @@
 </div>
 
 <div align="center">
-  Wayland clipboard "manager" with fast persistent history and multi-media
-  support. Stores and previews clipboard entries (text, images) on the command
+  Lightweight Wayland clipboard "manager" with fast persistent history and
+  robust multi-media support. Stores and previews clipboard entries (text, images)
+  on the clipboard with a neat TUI and advanced scripting capabilities.
   line.
 </div>
 
@@ -35,8 +36,8 @@
 
 ## Features
 
-Stash is a feature-rich, yet simple clipboard management utility with many
-features such as but not limited to:
+Stash is a feature-rich, yet simple and lightweight clipboard management utility
+with many features such as but not necessarily limited to:
 
 - Automatic MIME detection for stored entries
 - Fast persistent storage using SQLite
@@ -64,7 +65,7 @@ you are on NixOS.
 ```nix
 {
   # Add Stash to your inputs like so
-  inputs.stash.url = "github:notashelf/stash";
+  inputs.stash.url = "github:NotAShelf/stash";
 
   outputs = { /* ... */ };
 }
@@ -86,10 +87,11 @@ in {
 }
 ```
 
-You can also run it one time with `nix run`
+If you want to give Stash a try before you switch to it, you may also run it one
+time with `nix run`.
 
 ```sh
-nix run github:notashelf/stash -- watch # start the watch daemon
+nix run github:NotAShelf/stash -- watch # start the watch daemon
 ```
 
 ### Without Nix
@@ -98,12 +100,13 @@ nix run github:notashelf/stash -- watch # start the watch daemon
 
 You can also install Stash on any of your systems _without_ using Nix. New
 releases are made when a version gets tagged, and are available under
-[GitHub Releases]. To install Stash on your system without Nix, eiter:
+[GitHub Releases]. To install Stash on your system without Nix, either:
 
 - Download a tagged release from [GitHub Releases] for your platform and place
   the binary in your `$PATH`. Instructions may differ based on your
   distribution, but generally you want to download the built binary from
-  releases and put it somewhere like `/usr/bin`.
+  releases and put it somewhere like `/usr/bin` or `~/.local/bin` depending on
+  your distribution.
 - Build and install from source with Cargo:
 
   ```bash
@@ -112,15 +115,62 @@ releases are made when a version gets tagged, and are available under
 
 ## Usage
 
-Command interface is only slightly different from Cliphist. In most cases, it
-will be as simple as replacing `cliphist` with `stash` in your commands, aliases
-or scripts.
-
 > [!NOTE]
 > It is not a priority to provide 1:1 backwards compatibility with Cliphist.
 > While the interface is _almost_ identical, Stash chooses to build upon
 > Cliphist's design and extend existing design choices. See
 > [Migrating from Cliphist](#migrating-from-cliphist) for more details.
+
+The command interface of Stash is _only slightly_ different from Cliphist. In
+most cases, you may simply replace `cliphist` with `stash` and your commands,
+aliases or scripts will continue to work as intended.
+
+Some of the commands allow further fine-graining with flags such as `--type` or
+`--format` to allow specific input and output specifiers. See `--help` for
+individual subcommands if in doubt.
+
+<!-- markdownlint-disable MD013 -->
+
+```console
+$ stash help
+Wayland clipboard manager
+
+Usage: stash [OPTIONS] [COMMAND]
+
+Commands:
+  store   Store clipboard contents
+  list    List clipboard history
+  decode  Decode and output clipboard entry by id
+  delete  Delete clipboard entry by id (if numeric), or entries matching a query (if not). Numeric arguments are treated as ids. Use --type to specify explicitly
+  wipe    Wipe all clipboard history
+  import  Import clipboard data from stdin (default: TSV format)
+  watch   Start a process to watch clipboard for changes and store automatically
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --max-items <MAX_ITEMS>
+          Maximum number of clipboard entries to keep [default: 18446744073709551615]
+      --max-dedupe-search <MAX_DEDUPE_SEARCH>
+          Number of recent entries to check for duplicates when storing new clipboard data [default: 20]
+      --preview-width <PREVIEW_WIDTH>
+          Maximum width (in characters) for clipboard entry previews in list output [default: 100]
+      --db-path <DB_PATH>
+          Path to the `SQLite` clipboard database file
+      --excluded-apps <EXCLUDED_APPS>
+          Application names to exclude from clipboard history [env: STASH_EXCLUDED_APPS=]
+      --ask
+          Ask for confirmation before destructive operations
+  -v, --verbose...
+          Increase logging verbosity
+  -q, --quiet...
+          Decrease logging verbosity
+  -h, --help
+          Print help
+  -V, --version
+          Print version
+```
+
+<!-- markdownlint-enable MD013 -->
 
 ### Store an entry
 
@@ -134,17 +184,33 @@ echo "some clipboard text" | stash store
 stash list
 ```
 
+Stash list will list all entries in an interactive TUI that allows navigation
+and copying/deleting entries. This behaviour is EXCLUSIVE TO TTYs and Stash will
+display entries in Cliphist-compatible TSV format in Bash scripts. You may also
+enforce the output format with `stash list --format <tsv | json>`.
+
 ### Decode an entry by ID
 
 ```bash
-stash decode --input "1234"
+stash decode <input ID>
 ```
+
+> [!TIP]
+> Decoding from dmenu-compatible tools:
+>
+> ```bash
+> stash list | tofi | stash decode
+> ```
 
 ### Delete entries matching a query
 
 ```bash
-stash delete --type query --arg "some text"
+stash delete --type [id | query] <text or ID>
 ```
+
+By default stash will try to guess the type of an entry, but this may not be
+desirable for all users. If you wish to be explicit, pass `--type` to
+`stash delete`.
 
 ### Delete multiple entries by ID (from a file or stdin)
 
@@ -205,7 +271,8 @@ This can be configured in one of two ways. You can use the **environment
 variable** `STASTH_SENSITIVE_REGEX` to a valid regex pattern, and if the
 clipboard text matches the regex it will not be stored. This can be used for
 trivial secrets such as but not limited to GitHub tokens or secrets that follow
-a rule, e.g. a prefix.
+a rule, e.g. a prefix. You would typically set this in your `~/.bashrc` or
+similar but in some cases this might be a security flaw.
 
 The safer alternative to this is using **Systemd LoadCrediental**. If Stash is
 running as a Systemd service, you can provide a regex pattern using a crediental
@@ -228,6 +295,9 @@ logged.
 > **Example regex to block common password patterns**:
 >
 > `(password|secret|api[_-]?key|token)[=: ]+[^\s]+`
+>
+> For security reasons, you are recommended to use the regex only for generic
+> tokens that follow a specific rule, for example a generic prefix or suffix.
 
 #### Clipboard Filtering by Application Class
 
@@ -326,6 +396,26 @@ figured out something new, e.g. a neat shell trick, feel free to add it here!
    ```bash
    cliphist list --db ~/.cache/cliphist/db | stash import
    ```
+
+3. Stash provides its own implementation of `wl-copy` and `wl-paste` commands
+   backed by `wl-clipboard-rs`. Those implementations are backwards compatible
+   with `wl-clipboard`, and may be used as **drop-in** replacements. The default
+   build wrapper in `build.rs` links `stash` to `stash-copy` and `stash-paste`,
+   which are also available as `wl-copy` and `wl-paste` respectively. The Nix
+   package automatically links those to `$out/bin` for you, which means they are
+   installed by default but other package managers may need additional steps by
+   the packagers. While building from source, you may link
+   `target/release/stash` manually.
+
+## Attributions
+
+My thanks go first to [@YaLTeR](https://github.com/YaLTeR/) for the
+[wl-clipboard-rs](https://github.com/YaLTeR/wl-clipboard-rs) crate. Stash is
+powered by [several crates](./Cargo.toml), but none of them were as detrimental
+in Stash's design process.
+
+Additional thanks to my testers, who have tested earlier versions of Stash and
+provided feedback. Thank you :)
 
 ## License
 

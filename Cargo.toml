@@ -10,21 +10,23 @@ repository = "https://github.com/notashelf/stash"
 rust-version = "1.85"
 
 [[bin]]
-name = "stash"             # actual binary name for Nix, Cargo, etc.
+name = "stash"       # actual binary name for Nix, Cargo, etc.
 path = "src/main.rs"
 
 [features]
 default = ["use-toplevel", "notifications"]
-use-toplevel = ["dep:wayland-client", "dep:wayland-protocols", "dep:wayland-protocols-wlr"]
+use-toplevel = ["dep:wayland-client", "dep:wayland-protocols-wlr"]
 notifications = ["dep:notify-rust"]
 
 [dependencies]
 clap = { version = "4.5.48", features = ["derive", "env"] }
 clap-verbosity-flag = "3.0.4"
+ctrlc = "3.5.0"
+color-eyre = "0.6.5"
 dirs = "6.0.0"
 imagesize = "0.14.0"
 inquire = { default-features = false, version = "0.9.1", features = [
-    "crossterm",
+  "crossterm",
 ] }
 log = "0.4.28"
 env_logger = "0.11.8"
@@ -40,9 +42,8 @@ ratatui = "0.29.0"
 crossterm = "0.29.0"
 unicode-segmentation = "1.12.0"
 unicode-width = "0.2.0" # FIXME: held back by ratatui
-wayland-client = { version = "0.31.11", optional = true }
-wayland-protocols = { version = "0.32.0", optional = true }
-wayland-protocols-wlr = { version = "0.3.9", optional = true }
+wayland-client = { version = "0.31.11", features = ["log"], optional = true }
+wayland-protocols-wlr = { version = "0.3.9", default-features = false, optional = true }
 notify-rust = { version = "4.11.7", optional = true }
 
 [profile.release]

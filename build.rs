@@ -5,16 +5,6 @@ const MULTICALL_LINKS: &[&str] =
   &["stash-copy", "stash-paste", "wl-copy", "wl-paste"];
 
 fn main() {
-  // Only run on Unix-like systems
-  #[cfg(not(unix))]
-  {
-    println!(
-      "cargo:warning=Multicall symlinks are only supported on Unix-like \
-       systems."
-    );
-    return;
-  }
-
   // OUT_DIR is something like .../target/debug/build/<pkg>/out
   // We want .../target/debug or .../target/release
   let out_dir = env::var("OUT_DIR").expect("OUT_DIR not set");
