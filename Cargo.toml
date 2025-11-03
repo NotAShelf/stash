@@ -21,7 +21,7 @@ notifications = ["dep:notify-rust"]
 [dependencies]
 clap = { version = "4.5.50", features = ["derive", "env"] }
 clap-verbosity-flag = "3.0.4"
-ctrlc = "3.5.0"
+ctrlc = "3.5.1"
 color-eyre = "0.6.5"
 dirs = "6.0.0"
 imagesize = "0.14.0"
