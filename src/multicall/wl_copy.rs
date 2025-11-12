@@ -106,7 +106,7 @@ fn handle_check_primary() {
   std::process::exit(exit_code);
 }
 
-fn get_clipboard_type(primary: bool) -> CopyClipboardType {
+const fn get_clipboard_type(primary: bool) -> CopyClipboardType {
   if primary {
     CopyClipboardType::Primary
   } else {
@@ -213,21 +213,32 @@ fn handle_clear_clipboard(
 }
 
 fn fork_and_serve(prepared_copy: wl_clipboard_rs::copy::PreparedCopy) {
-  // Use a simpler approach: serve in background thread instead of forking
-  // This avoids all the complexity and safety issues with fork()
-  let handle = std::thread::spawn(move || {
-    if let Err(e) = prepared_copy.serve() {
-      log::error!("background clipboard service failed: {e}");
+  // Use proper Unix fork() to create a child process that continues
+  // serving clipboard content after parent exits.
+  // XXX: I wanted to choose and approach without fork, but we could not
+  // ensure persistence after the thread dies. Alas, we gotta fork.
+  unsafe {
+    match libc::fork() {
+      0 => {
+        // Child process - serve clipboard content
+        if let Err(e) = prepared_copy.serve() {
+          log::error!("background clipboard service failed: {e}");
+          std::process::exit(1);
+        }
+        std::process::exit(0);
+      },
+      -1 => {
+        // Fork failed
+        log::error!("failed to fork background process");
+        std::process::exit(1);
+      },
+      _ => {
+        // Parent process - exit immediately
+        log::debug!("forked background process to serve clipboard content");
+        std::process::exit(0);
+      },
     }
-  });
-
-  // Give the background thread a moment to start
-  std::thread::sleep(std::time::Duration::from_millis(50));
-  log::debug!("clipboard service started in background thread");
-
-  // Detach the thread to allow it to run independently
-  // The thread will be cleaned up when it completes or when the process exits
-  std::mem::forget(handle);
+  }
 }
 
 pub fn wl_copy_main() -> Result<()> {
@@ -255,14 +266,23 @@ pub fn wl_copy_main() -> Result<()> {
 
   // Handle foreground vs background mode
   if args.foreground {
-    // Foreground mode: copy and serve in current process
-    opts
-      .copy(Source::Bytes(input.into()), mime_type)
-      .context("failed to copy to clipboard")?;
+    // Foreground mode: copy content and serve in current process
+    // Use prepare_copy + serve to ensure proper clipboard registration
+    let mut opts_fg = opts;
+    opts_fg.foreground(true);
+
+    let prepared_copy = opts_fg
+      .prepare_copy(Source::Bytes(input.into()), mime_type)
+      .context("failed to prepare copy")?;
+
+    // Serve in foreground - blocks until interrupted (Ctrl+C, etc.)
+    prepared_copy
+      .serve()
+      .context("failed to serve clipboard content")?;
   } else {
     // Background mode: spawn child process to serve requests
     // First prepare to copy to validate before spawning
-    let mut opts_fg = opts.clone();
+    let mut opts_fg = opts;
     opts_fg.foreground(true);
 
     let prepared_copy = opts_fg
