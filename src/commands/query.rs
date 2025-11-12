@@ -6,6 +6,6 @@ pub trait QueryCommand {
 
 impl QueryCommand for SqliteClipboardDb {
   fn query_delete(&self, query: &str) -> Result<usize, StashError> {
-    <SqliteClipboardDb as ClipboardDb>::delete_query(self, query)
+    <Self as ClipboardDb>::delete_query(self, query)
   }
 }
