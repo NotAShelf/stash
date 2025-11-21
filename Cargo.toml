@@ -28,6 +28,7 @@ imagesize = "0.14.0"
 inquire = { default-features = false, version = "0.9.1", features = [
   "crossterm",
 ] }
+libc = "0.2.177"
 log = "0.4.28"
 env_logger = "0.11.8"
 thiserror = "2.0.17"

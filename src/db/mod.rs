@@ -266,7 +266,7 @@ impl ClipboardDb for SqliteClipboardDb {
       .execute(
         "INSERT INTO clipboard (contents, mime, content_hash) VALUES (?1, ?2, \
          ?3)",
-        params![buf, mime.map(|s| s.to_string()), content_hash],
+        params![buf, mime, content_hash],
       )
       .map_err(|e| StashError::Store(e.to_string().into()))?;
 
