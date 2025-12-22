@@ -32,7 +32,7 @@ libc = "0.2.177"
 log = "0.4.28"
 env_logger = "0.11.8"
 thiserror = "2.0.17"
-wl-clipboard-rs = "0.9.2"
+wl-clipboard-rs = "0.9.3"
 rusqlite = { version = "0.38.0", features = ["bundled"] }
 smol = "2.0.2"
 serde = { version = "1.0.228", features = ["derive"] }
