@@ -1,13 +1,13 @@
 [package]
 name = "stash-clipboard"
 description = "Wayland clipboard manager with fast persistent history and multi-media support"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 authors = ["NotAShelf <raf@notashelf.dev>"]
 license = "MPL-2.0"
 readme = true
 repository = "https://github.com/notashelf/stash"
-rust-version = "1.85"
+rust-version = "1.90"
 
 [[bin]]
 name = "stash"       # actual binary name for Nix, Cargo, etc.
