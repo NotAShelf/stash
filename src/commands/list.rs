@@ -61,14 +61,14 @@ impl SqliteClipboardDb {
       .query([])
       .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
 
-    let mut entries: Vec<(u64, String, String)> = Vec::new();
+    let mut entries: Vec<(i64, String, String)> = Vec::new();
     let mut max_id_width = 2;
     let mut max_mime_width = 8;
     while let Some(row) = rows
       .next()
       .map_err(|e| StashError::ListDecode(e.to_string().into()))?
     {
-      let id: u64 = row
+      let id: i64 = row
         .get(0)
         .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
       let contents: Vec<u8> = row

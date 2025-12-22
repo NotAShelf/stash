@@ -56,7 +56,7 @@ pub enum StashError {
   #[error("Failed to delete entry during query delete: {0}")]
   QueryDelete(Box<str>),
   #[error("Failed to delete entry with id {0}: {1}")]
-  DeleteEntry(u64, Box<str>),
+  DeleteEntry(i64, Box<str>),
 }
 
 pub trait ClipboardDb {
@@ -66,7 +66,7 @@ pub trait ClipboardDb {
     max_dedupe_search: u64,
     max_items: u64,
     excluded_apps: Option<&[String]>,
-  ) -> Result<u64, StashError>;
+  ) -> Result<i64, StashError>;
 
   fn deduplicate_by_hash(
     &self,
@@ -89,7 +89,7 @@ pub trait ClipboardDb {
   ) -> Result<(), StashError>;
   fn delete_query(&self, query: &str) -> Result<usize, StashError>;
   fn delete_entries(&self, input: impl Read) -> Result<usize, StashError>;
-  fn next_sequence(&self) -> u64;
+  fn next_sequence(&self) -> i64;
 }
 
 #[derive(Serialize, Deserialize)]
@@ -184,7 +184,7 @@ impl SqliteClipboardDb {
       .next()
       .map_err(|e| StashError::ListDecode(e.to_string().into()))?
     {
-      let id: u64 = row
+      let id: i64 = row
         .get(0)
         .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
       let contents: Vec<u8> = row
@@ -219,7 +219,7 @@ impl ClipboardDb for SqliteClipboardDb {
     max_dedupe_search: u64,
     max_items: u64,
     excluded_apps: Option<&[String]>,
-  ) -> Result<u64, StashError> {
+  ) -> Result<i64, StashError> {
     let mut buf = Vec::new();
     if input.read_to_end(&mut buf).is_err()
       || buf.is_empty()
@@ -297,7 +297,7 @@ impl ClipboardDb for SqliteClipboardDb {
       .next()
       .map_err(|e| StashError::DeduplicationRead(e.to_string().into()))?
     {
-      let id: u64 = row
+      let id: i64 = row
         .get(0)
         .map_err(|e| StashError::DeduplicationDecode(e.to_string().into()))?;
       self
@@ -310,12 +310,13 @@ impl ClipboardDb for SqliteClipboardDb {
   }
 
   fn trim_db(&self, max: u64) -> Result<(), StashError> {
-    let count: u64 = self
+    let count: i64 = self
       .conn
       .query_row("SELECT COUNT(*) FROM clipboard", [], |row| row.get(0))
       .map_err(|e| StashError::Trim(e.to_string().into()))?;
-    if count > max {
-      let to_delete = count - max;
+    let max_i64 = i64::try_from(max).unwrap_or(i64::MAX);
+    if count > max_i64 {
+      let to_delete = count - max_i64;
       self
         .conn
         .execute(
@@ -329,7 +330,7 @@ impl ClipboardDb for SqliteClipboardDb {
   }
 
   fn delete_last(&self) -> Result<(), StashError> {
-    let id: Option<u64> = self
+    let id: Option<i64> = self
       .conn
       .query_row(
         "SELECT id FROM clipboard ORDER BY id DESC LIMIT 1",
@@ -379,7 +380,7 @@ impl ClipboardDb for SqliteClipboardDb {
       .next()
       .map_err(|e| StashError::ListDecode(e.to_string().into()))?
     {
-      let id: u64 = row
+      let id: i64 = row
         .get(0)
         .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
       let contents: Vec<u8> = row
@@ -413,7 +414,7 @@ impl ClipboardDb for SqliteClipboardDb {
         .map_err(|e| StashError::DecodeExtractId(e.to_string().into()))?;
       buf
     };
-    let id = extract_id(&input_str)
+    let id: i64 = extract_id(&input_str)
       .map_err(|e| StashError::DecodeExtractId(e.into()))?;
     let (contents, _mime): (Vec<u8>, Option<String>) = self
       .conn
@@ -443,7 +444,7 @@ impl ClipboardDb for SqliteClipboardDb {
       .next()
       .map_err(|e| StashError::QueryDelete(e.to_string().into()))?
     {
-      let id: u64 = row
+      let id: i64 = row
         .get(0)
         .map_err(|e| StashError::QueryDelete(e.to_string().into()))?;
       let contents: Vec<u8> = row
@@ -475,11 +476,11 @@ impl ClipboardDb for SqliteClipboardDb {
     Ok(deleted)
   }
 
-  fn next_sequence(&self) -> u64 {
+  fn next_sequence(&self) -> i64 {
     match self
       .conn
       .query_row("SELECT MAX(id) FROM clipboard", [], |row| {
-        row.get::<_, Option<u64>>(0)
+        row.get::<_, Option<i64>>(0)
       }) {
       Ok(Some(max_id)) => max_id + 1,
       Ok(None) | Err(_) => 1,
@@ -519,7 +520,7 @@ fn load_sensitive_regex() -> Option<Regex> {
   REGEX_CACHE.get().and_then(std::clone::Clone::clone)
 }
 
-pub fn extract_id(input: &str) -> Result<u64, &'static str> {
+pub fn extract_id(input: &str) -> Result<i64, &'static str> {
   let id_str = input.split('\t').next().unwrap_or("");
   id_str.parse().map_err(|_| "invalid id")
 }
