@@ -66,7 +66,7 @@ struct WlPasteArgs {
   watch: Option<Vec<String>>,
 }
 
-fn get_paste_mime_type(mime_arg: Option<&str>) -> PasteMimeType {
+fn get_paste_mime_type(mime_arg: Option<&str>) -> PasteMimeType<'_> {
   match mime_arg {
     None | Some("text" | "autodetect") => PasteMimeType::Text,
     Some(other) => PasteMimeType::Specific(other),
