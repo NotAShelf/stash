@@ -366,7 +366,7 @@ fn handle_regular_paste(
   let mime_type = get_paste_mime_type(args.mime_type.as_deref());
 
   match get_contents(clipboard, seat, mime_type) {
-    Ok((mut reader, _types)) => {
+    Ok((mut reader, types)) => {
       let mut out = io::stdout();
       let mut buf = Vec::new();
       let mut temp_buffer = [0; 8192];
@@ -396,7 +396,20 @@ fn handle_regular_paste(
       if let Err(e) = out.write_all(&buf) {
         bail!("failed to write to stdout: {e}");
       }
-      if !args.no_newline && !buf.ends_with(b"\n") {
+
+      // Only add newline for text content, not binary data
+      // Check if the MIME type indicates text content
+      let is_text_content = if !types.is_empty() {
+        types.starts_with("text/")
+          || types == "application/json"
+          || types == "application/xml"
+          || types == "application/x-sh"
+      } else {
+        // If no MIME type, check if content is valid UTF-8
+        std::str::from_utf8(&buf).is_ok()
+      };
+
+      if !args.no_newline && is_text_content && !buf.ends_with(b"\n") {
         if let Err(e) = out.write_all(b"\n") {
           bail!("failed to write newline to stdout: {e}");
         }
