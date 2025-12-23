@@ -358,15 +358,77 @@ fn execute_watch_command(
   Ok(())
 }
 
+/// Select the best MIME type from available types when none is specified.
+/// Prefers specific content types (image/*, application/*) over generic
+/// text representations (TEXT, STRING, UTF8_STRING).
+fn select_best_mime_type(
+  types: &std::collections::HashSet<String>,
+) -> Option<String> {
+  if types.is_empty() {
+    return None;
+  }
+
+  // If only one type available, use it
+  if types.len() == 1 {
+    return types.iter().next().cloned();
+  }
+
+  // Prefer specific MIME types with slashes (e.g., image/png, application/pdf)
+  // over generic X11 selections (TEXT, STRING, UTF8_STRING)
+  let specific_types: Vec<_> =
+    types.iter().filter(|t| t.contains('/')).collect();
+
+  if !specific_types.is_empty() {
+    // Among specific types, prefer non-text types first
+    for mime in &specific_types {
+      if !mime.starts_with("text/") {
+        return Some((*mime).clone());
+      }
+    }
+    // If all are text types, prefer text/plain with charset
+    for mime in &specific_types {
+      if mime.starts_with("text/plain;charset=") {
+        return Some((*mime).clone());
+      }
+    }
+    // Otherwise return first specific type
+    return Some(specific_types[0].clone());
+  }
+
+  // Fall back to generic text selections in order of preference
+  for fallback in &["UTF8_STRING", "STRING", "TEXT"] {
+    if types.contains(*fallback) {
+      return Some((*fallback).to_string());
+    }
+  }
+
+  // Last resort: return any available type
+  types.iter().next().cloned()
+}
+
 fn handle_regular_paste(
   args: &WlPasteArgs,
   clipboard: PasteClipboardType,
   seat: PasteSeat,
 ) -> Result<()> {
-  let mime_type = get_paste_mime_type(args.mime_type.as_deref());
+  // If no MIME type specified, select the best available MIME type
+  let available_types = if args.mime_type.is_none() {
+    get_mime_types(clipboard, seat).ok()
+  } else {
+    None
+  };
+
+  let selected_type = available_types.as_ref().and_then(select_best_mime_type);
+
+  let mime_type = if let Some(ref best) = selected_type {
+    log::debug!("Auto-selecting MIME type: {}", best);
+    PasteMimeType::Specific(best)
+  } else {
+    get_paste_mime_type(args.mime_type.as_deref())
+  };
 
   match get_contents(clipboard, seat, mime_type) {
-    Ok((mut reader, _types)) => {
+    Ok((mut reader, types)) => {
       let mut out = io::stdout();
       let mut buf = Vec::new();
       let mut temp_buffer = [0; 8192];
@@ -396,10 +458,25 @@ fn handle_regular_paste(
       if let Err(e) = out.write_all(&buf) {
         bail!("failed to write to stdout: {e}");
       }
-      if !args.no_newline && !buf.ends_with(b"\n") {
-        if let Err(e) = out.write_all(b"\n") {
-          bail!("failed to write newline to stdout: {e}");
-        }
+
+      // Only add newline for text content, not binary data
+      // Check if the MIME type indicates text content
+      let is_text_content = if !types.is_empty() {
+        types.starts_with("text/")
+          || types == "application/json"
+          || types == "application/xml"
+          || types == "application/x-sh"
+      } else {
+        // If no MIME type, check if content is valid UTF-8
+        std::str::from_utf8(&buf).is_ok()
+      };
+
+      if !args.no_newline
+        && is_text_content
+        && !buf.ends_with(b"\n")
+        && let Err(e) = out.write_all(b"\n")
+      {
+        bail!("failed to write newline to stdout: {e}");
       }
     },
     Err(PasteError::NoSeats) => {
