@@ -55,7 +55,10 @@ impl SqliteClipboardDb {
     // Query entries from DB
     let mut stmt = self
       .conn
-      .prepare("SELECT id, contents, mime FROM clipboard ORDER BY id DESC")
+      .prepare(
+        "SELECT id, contents, mime FROM clipboard ORDER BY last_accessed \
+         DESC, id DESC",
+      )
       .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
     let mut rows = stmt
       .query([])
@@ -242,8 +245,7 @@ impl SqliteClipboardDb {
 
         if event::poll(std::time::Duration::from_millis(250))
           .map_err(|e| StashError::ListDecode(e.to_string().into()))?
-        {
-          if let Event::Key(key) = event::read()
+          && let Event::Key(key) = event::read()
             .map_err(|e| StashError::ListDecode(e.to_string().into()))?
           {
             match (key.code, key.modifiers) {
@@ -275,50 +277,62 @@ impl SqliteClipboardDb {
                 state.select(Some(i));
               },
               (KeyCode::Enter, _) => {
-                if let Some(idx) = state.selected() {
-                  if let Some((id, ..)) = entries.get(idx) {
-                    // Fetch full contents for the selected entry
-                    let (contents, mime): (Vec<u8>, Option<String>) = self
-                      .conn
-                      .query_row(
-                        "SELECT contents, mime FROM clipboard WHERE id = ?1",
-                        rusqlite::params![id],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                      )
-                      .map_err(|e| {
-                        StashError::ListDecode(e.to_string().into())
-                      })?;
-                    // Copy to clipboard
-                    let opts = Options::new();
-                    // Default clipboard is regular, seat is default
-                    let mime_type = match mime {
-                      Some(ref m) if m == "text/plain" => MimeType::Text,
-                      Some(ref m) => MimeType::Specific(m.clone()),
-                      None => MimeType::Text,
-                    };
-                    let copy_result = opts
-                      .copy(Source::Bytes(contents.clone().into()), mime_type);
-                    match copy_result {
-                      Ok(()) => {
-                        let _ = Notification::new()
-                          .summary("Stash")
-                          .body("Copied entry to clipboard")
-                          .show();
+                if let Some(idx) = state.selected()
+                  && let Some((id, ..)) = entries.get(idx) {
+                    match self.copy_entry(*id) {
+                      Ok((new_id, contents, mime)) => {
+                        if new_id != *id {
+                          entries[idx] = (
+                            new_id,
+                            entries[idx].1.clone(),
+                            entries[idx].2.clone(),
+                          );
+                        }
+                        let opts = Options::new();
+                        let mime_type = match mime {
+                          Some(ref m) if m == "text/plain" => MimeType::Text,
+                          Some(ref m) => {
+                            MimeType::Specific(m.clone().to_owned())
+                          },
+                          None => MimeType::Text,
+                        };
+                        let copy_result = opts.copy(
+                          Source::Bytes(contents.clone().into()),
+                          mime_type,
+                        );
+                        match copy_result {
+                          Ok(()) => {
+                            let _ = Notification::new()
+                              .summary("Stash")
+                              .body("Copied entry to clipboard")
+                              .show();
+                          },
+                          Err(e) => {
+                            log::error!(
+                              "Failed to copy entry to clipboard: {e}"
+                            );
+                            let _ = Notification::new()
+                              .summary("Stash")
+                              .body(&format!(
+                                "Failed to copy to clipboard: {e}"
+                              ))
+                              .show();
+                          },
+                        }
                       },
                       Err(e) => {
-                        log::error!("Failed to copy entry to clipboard: {e}");
+                        log::error!("Failed to fetch entry {id}: {e}");
                         let _ = Notification::new()
                           .summary("Stash")
-                          .body(&format!("Failed to copy to clipboard: {e}"))
+                          .body(&format!("Failed to fetch entry: {e}"))
                           .show();
                       },
                     }
                   }
-                }
               },
               (KeyCode::Char('D'), KeyModifiers::SHIFT) => {
-                if let Some(idx) = state.selected() {
-                  if let Some((id, ..)) = entries.get(idx) {
+                if let Some(idx) = state.selected()
+                  && let Some((id, ..)) = entries.get(idx) {
                     // Delete entry from DB
                     self
                       .conn
@@ -345,12 +359,10 @@ impl SqliteClipboardDb {
                       .body("Deleted entry")
                       .show();
                   }
-                }
               },
               _ => {},
             }
           }
-        }
       }
       Ok(())
     })();

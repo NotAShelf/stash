@@ -89,6 +89,10 @@ pub trait ClipboardDb {
   ) -> Result<(), StashError>;
   fn delete_query(&self, query: &str) -> Result<usize, StashError>;
   fn delete_entries(&self, input: impl Read) -> Result<usize, StashError>;
+  fn copy_entry(
+    &self,
+    id: i64,
+  ) -> Result<(i64, Vec<u8>, Option<String>), StashError>;
   fn next_sequence(&self) -> i64;
 }
 
@@ -149,14 +153,41 @@ impl SqliteClipboardDb {
       )
       .map_err(|e| StashError::Store(e.to_string().into()))?;
 
+    conn
+      .execute_batch(
+        "CREATE TABLE IF NOT EXISTS clipboard (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                contents BLOB NOT NULL,
+                mime TEXT,
+                content_hash INTEGER,
+                last_accessed INTEGER DEFAULT (CAST(strftime('%s', 'now') AS \
+         INTEGER))
+            );",
+      )
+      .map_err(|e| StashError::Store(e.to_string().into()))?;
+
     // Add content_hash column if it doesn't exist
     // Migration MUST be done to avoid breaking existing installations.
     let _ =
       conn.execute("ALTER TABLE clipboard ADD COLUMN content_hash INTEGER", []);
 
+    // Add last_accessed column if it doesn't exist
+    let _ = conn.execute(
+      "ALTER TABLE clipboard ADD COLUMN last_accessed INTEGER DEFAULT \
+       (CAST(strftime('%s', 'now') AS INTEGER))",
+      [],
+    );
+
     // Create index for content_hash if it doesn't exist
     let _ = conn.execute(
       "CREATE INDEX IF NOT EXISTS idx_content_hash ON clipboard(content_hash)",
+      [],
+    );
+
+    // Create index for last_accessed if it doesn't exist
+    let _ = conn.execute(
+      "CREATE INDEX IF NOT EXISTS idx_last_accessed ON \
+       clipboard(last_accessed)",
       [],
     );
 
@@ -172,7 +203,10 @@ impl SqliteClipboardDb {
   pub fn list_json(&self) -> Result<String, StashError> {
     let mut stmt = self
       .conn
-      .prepare("SELECT id, contents, mime FROM clipboard ORDER BY id DESC")
+      .prepare(
+        "SELECT id, contents, mime FROM clipboard ORDER BY \
+         COALESCE(last_accessed, 0) DESC, id DESC",
+      )
       .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
     let mut rows = stmt
       .query([])
@@ -243,11 +277,11 @@ impl ClipboardDb for SqliteClipboardDb {
     let regex = load_sensitive_regex();
     if let Some(re) = regex {
       // Only check text data
-      if let Ok(s) = std::str::from_utf8(&buf) {
-        if re.is_match(s) {
-          warn!("Clipboard entry matches sensitive regex, skipping store.");
-          return Err(StashError::Store("Filtered by sensitive regex".into()));
-        }
+      if let Ok(s) = std::str::from_utf8(&buf)
+        && re.is_match(s)
+      {
+        warn!("Clipboard entry matches sensitive regex, skipping store.");
+        return Err(StashError::Store("Filtered by sensitive regex".into()));
       }
     }
 
@@ -317,6 +351,8 @@ impl ClipboardDb for SqliteClipboardDb {
     let max_i64 = i64::try_from(max).unwrap_or(i64::MAX);
     if count > max_i64 {
       let to_delete = count - max_i64;
+
+      #[allow(clippy::useless_conversion)]
       self
         .conn
         .execute(
@@ -369,7 +405,10 @@ impl ClipboardDb for SqliteClipboardDb {
   ) -> Result<usize, StashError> {
     let mut stmt = self
       .conn
-      .prepare("SELECT id, contents, mime FROM clipboard ORDER BY id DESC")
+      .prepare(
+        "SELECT id, contents, mime FROM clipboard ORDER BY \
+         COALESCE(last_accessed, 0) DESC, id DESC",
+      )
       .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
     let mut rows = stmt
       .query([])
@@ -474,6 +513,48 @@ impl ClipboardDb for SqliteClipboardDb {
       }
     }
     Ok(deleted)
+  }
+
+  fn copy_entry(
+    &self,
+    id: i64,
+  ) -> Result<(i64, Vec<u8>, Option<String>), StashError> {
+    let (contents, mime, content_hash): (Vec<u8>, Option<String>, Option<i64>) =
+      self
+        .conn
+        .query_row(
+          "SELECT contents, mime, content_hash FROM clipboard WHERE id = ?1",
+          params![id],
+          |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|e| StashError::DecodeGet(e.to_string().into()))?;
+
+    if let Some(hash) = content_hash {
+      let most_recent_id: Option<i64> = self
+        .conn
+        .query_row(
+          "SELECT id FROM clipboard WHERE content_hash = ?1 AND last_accessed \
+           = (SELECT MAX(last_accessed) FROM clipboard WHERE content_hash = \
+           ?1)",
+          params![hash],
+          |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| StashError::DecodeGet(e.to_string().into()))?;
+
+      if most_recent_id != Some(id) {
+        self
+          .conn
+          .execute(
+            "UPDATE clipboard SET last_accessed = CAST(strftime('%s', 'now') \
+             AS INTEGER) WHERE id = ?1",
+            params![id],
+          )
+          .map_err(|e| StashError::Store(e.to_string().into()))?;
+      }
+    }
+
+    Ok((id, contents, mime))
   }
 
   fn next_sequence(&self) -> i64 {
@@ -693,11 +774,11 @@ fn get_focused_window_app() -> Option<String> {
   }
 
   // Fallback: Check WAYLAND_CLIENT_NAME environment variable
-  if let Ok(client) = env::var("WAYLAND_CLIENT_NAME") {
-    if !client.is_empty() {
-      debug!("Found WAYLAND_CLIENT_NAME: {client}");
-      return Some(client);
-    }
+  if let Ok(client) = env::var("WAYLAND_CLIENT_NAME")
+    && !client.is_empty()
+  {
+    debug!("Found WAYLAND_CLIENT_NAME: {client}");
+    return Some(client);
   }
 
   debug!("No focused window detection method worked");
@@ -717,19 +798,17 @@ fn get_recently_active_excluded_app(
 
   if let Ok(entries) = std::fs::read_dir(proc_dir) {
     for entry in entries.flatten() {
-      if let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() {
-        if let Ok(comm) = fs::read_to_string(format!("/proc/{pid}/comm")) {
-          let process_name = comm.trim();
+      if let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>()
+        && let Ok(comm) = fs::read_to_string(format!("/proc/{pid}/comm"))
+      {
+        let process_name = comm.trim();
 
-          // Check process name against exclusion list
-          if app_matches_exclusion(process_name, excluded_apps)
-            && has_recent_activity(pid)
-          {
-            candidates.push((
-              process_name.to_string(),
-              get_process_activity_score(pid),
-            ));
-          }
+        // Check process name against exclusion list
+        if app_matches_exclusion(process_name, excluded_apps)
+          && has_recent_activity(pid)
+        {
+          candidates
+            .push((process_name.to_string(), get_process_activity_score(pid)));
         }
       }
     }
@@ -763,15 +842,13 @@ fn has_recent_activity(pid: u32) -> bool {
   // Check /proc/PID/io for recent I/O activity
   if let Ok(io_stats) = fs::read_to_string(format!("/proc/{pid}/io")) {
     for line in io_stats.lines() {
-      if line.starts_with("write_bytes:") || line.starts_with("read_bytes:") {
-        if let Some(value_str) = line.split(':').nth(1) {
-          if let Ok(value) = value_str.trim().parse::<u64>() {
-            if value > 1024 * 1024 {
-              // 1MB threshold
-              return true;
-            }
-          }
-        }
+      if (line.starts_with("write_bytes:") || line.starts_with("read_bytes:"))
+        && let Some(value_str) = line.split(':').nth(1)
+        && let Ok(value) = value_str.trim().parse::<u64>()
+        && value > 1024 * 1024
+      {
+        // 1MB threshold
+        return true;
       }
     }
   }
@@ -786,24 +863,22 @@ fn get_process_activity_score(pid: u32) -> u64 {
   // Add CPU time to score
   if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
     let fields: Vec<&str> = stat.split_whitespace().collect();
-    if fields.len() > 14 {
-      if let (Ok(utime), Ok(stime)) =
+    if fields.len() > 14
+      && let (Ok(utime), Ok(stime)) =
         (fields[13].parse::<u64>(), fields[14].parse::<u64>())
-      {
-        score += utime + stime;
-      }
+    {
+      score += utime + stime;
     }
   }
 
   // Add I/O activity to score
   if let Ok(io_stats) = fs::read_to_string(format!("/proc/{pid}/io")) {
     for line in io_stats.lines() {
-      if line.starts_with("write_bytes:") || line.starts_with("read_bytes:") {
-        if let Some(value_str) = line.split(':').nth(1) {
-          if let Ok(value) = value_str.trim().parse::<u64>() {
-            score += value / 1024; // convert to KB
-          }
-        }
+      if (line.starts_with("write_bytes:") || line.starts_with("read_bytes:"))
+        && let Some(value_str) = line.split(':').nth(1)
+        && let Ok(value) = value_str.trim().parse::<u64>()
+      {
+        score += value / 1024; // convert to KB
       }
     }
   }
@@ -834,11 +909,11 @@ fn app_matches_exclusion(app_name: &str, excluded_apps: &[String]) -> bool {
     } else if excluded.contains('*') {
       // Simple wildcard matching
       let pattern = excluded.replace('*', ".*");
-      if let Ok(regex) = regex::Regex::new(&pattern) {
-        if regex.is_match(app_name) {
-          debug!("Matched wildcard pattern: {app_name} matches {excluded}");
-          return true;
-        }
+      if let Ok(regex) = regex::Regex::new(&pattern)
+        && regex.is_match(app_name)
+      {
+        debug!("Matched wildcard pattern: {app_name} matches {excluded}");
+        return true;
       }
     }
   }

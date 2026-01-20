@@ -33,12 +33,11 @@ pub fn init_wayland_state() {
 /// Get the currently focused window application name using Wayland protocols
 pub fn get_focused_window_app() -> Option<String> {
   // Try Wayland protocol first
-  if let Ok(focused) = FOCUSED_APP.lock() {
-    if let Some(ref app) = *focused {
+  if let Ok(focused) = FOCUSED_APP.lock()
+    && let Some(ref app) = *focused {
       debug!("Found focused app via Wayland protocol: {app}");
       return Some(app.clone());
     }
-  }
 
   debug!("No focused window detection method worked");
   None
@@ -81,12 +80,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppState {
       interface,
       version: _,
     } = event
-    {
-      if interface == "zwlr_foreign_toplevel_manager_v1" {
+      && interface == "zwlr_foreign_toplevel_manager_v1" {
         let _manager: ZwlrForeignToplevelManagerV1 =
           registry.bind(name, 1, qh, ());
       }
-    }
   }
 
   fn event_created_child(
@@ -155,12 +152,10 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for AppState {
           // Update focused app to the `app_id` of this handle
           if let (Ok(apps), Ok(mut focused)) =
             (TOPLEVEL_APPS.lock(), FOCUSED_APP.lock())
-          {
-            if let Some(app_id) = apps.get(&handle_id) {
+            && let Some(app_id) = apps.get(&handle_id) {
               debug!("Setting focused app to: {app_id}");
               *focused = Some(app_id.clone());
             }
-          }
         }
       },
       zwlr_foreign_toplevel_handle_v1::Event::Closed => {
