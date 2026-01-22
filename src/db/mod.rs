@@ -114,7 +114,7 @@ pub struct SqliteClipboardDb {
 }
 
 impl SqliteClipboardDb {
-  pub fn new(conn: Connection) -> Result<Self, StashError> {
+  pub fn new(mut conn: Connection) -> Result<Self, StashError> {
     conn
       .pragma_update(None, "synchronous", "OFF")
       .map_err(|e| {
@@ -143,53 +143,124 @@ impl SqliteClipboardDb {
     conn.pragma_update(None, "page_size", "512") // small(er) pages
       .map_err(|e| StashError::Store(format!("Failed to set page_size pragma: {e}").into()))?;
 
-    conn
-      .execute_batch(
+    let tx = conn.transaction().map_err(|e| {
+      StashError::Store(
+        format!("Failed to begin migration transaction: {e}").into(),
+      )
+    })?;
+
+    let schema_version: i64 = tx
+      .pragma_query_value(None, "user_version", |row| row.get(0))
+      .map_err(|e| {
+        StashError::Store(format!("Failed to read schema version: {e}").into())
+      })?;
+
+    if schema_version == 0 {
+      tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS clipboard (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 contents BLOB NOT NULL,
                 mime TEXT
             );",
       )
-      .map_err(|e| StashError::Store(e.to_string().into()))?;
+      .map_err(|e| {
+        StashError::Store(
+          format!("Failed to create clipboard table: {e}").into(),
+        )
+      })?;
 
-    conn
-      .execute_batch(
-        "CREATE TABLE IF NOT EXISTS clipboard (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                contents BLOB NOT NULL,
-                mime TEXT,
-                content_hash INTEGER,
-                last_accessed INTEGER DEFAULT (CAST(strftime('%s', 'now') AS \
-         INTEGER))
-            );",
-      )
-      .map_err(|e| StashError::Store(e.to_string().into()))?;
+      tx.execute("PRAGMA user_version = 1", []).map_err(|e| {
+        StashError::Store(format!("Failed to set schema version: {e}").into())
+      })?;
+    }
 
     // Add content_hash column if it doesn't exist
     // Migration MUST be done to avoid breaking existing installations.
-    let _ =
-      conn.execute("ALTER TABLE clipboard ADD COLUMN content_hash INTEGER", []);
+    if schema_version < 2 {
+      let has_content_hash: bool = tx
+        .query_row(
+          "SELECT sql FROM sqlite_master WHERE type='table' AND \
+           name='clipboard'",
+          [],
+          |row| {
+            let sql: String = row.get(0)?;
+            Ok(sql.to_lowercase().contains("content_hash"))
+          },
+        )
+        .unwrap_or(false);
+
+      if !has_content_hash {
+        tx.execute("ALTER TABLE clipboard ADD COLUMN content_hash INTEGER", [])
+          .map_err(|e| {
+            StashError::Store(
+              format!("Failed to add content_hash column: {e}").into(),
+            )
+          })?;
+      }
+
+      // Create index for content_hash if it doesn't exist
+      tx.execute(
+        "CREATE INDEX IF NOT EXISTS idx_content_hash ON \
+         clipboard(content_hash)",
+        [],
+      )
+      .map_err(|e| {
+        StashError::Store(
+          format!("Failed to create content_hash index: {e}").into(),
+        )
+      })?;
+
+      tx.execute("PRAGMA user_version = 2", []).map_err(|e| {
+        StashError::Store(format!("Failed to set schema version: {e}").into())
+      })?;
+    }
 
     // Add last_accessed column if it doesn't exist
-    let _ = conn.execute(
-      "ALTER TABLE clipboard ADD COLUMN last_accessed INTEGER DEFAULT \
-       (CAST(strftime('%s', 'now') AS INTEGER))",
-      [],
-    );
+    if schema_version < 3 {
+      let has_last_accessed: bool = tx
+        .query_row(
+          "SELECT sql FROM sqlite_master WHERE type='table' AND \
+           name='clipboard'",
+          [],
+          |row| {
+            let sql: String = row.get(0)?;
+            Ok(sql.to_lowercase().contains("last_accessed"))
+          },
+        )
+        .unwrap_or(false);
 
-    // Create index for content_hash if it doesn't exist
-    let _ = conn.execute(
-      "CREATE INDEX IF NOT EXISTS idx_content_hash ON clipboard(content_hash)",
-      [],
-    );
+      if !has_last_accessed {
+        tx.execute("ALTER TABLE clipboard ADD COLUMN last_accessed INTEGER", [
+        ])
+        .map_err(|e| {
+          StashError::Store(
+            format!("Failed to add last_accessed column: {e}").into(),
+          )
+        })?;
+      }
 
-    // Create index for last_accessed if it doesn't exist
-    let _ = conn.execute(
-      "CREATE INDEX IF NOT EXISTS idx_last_accessed ON \
-       clipboard(last_accessed)",
-      [],
-    );
+      // Create index for last_accessed if it doesn't exist
+      tx.execute(
+        "CREATE INDEX IF NOT EXISTS idx_last_accessed ON \
+         clipboard(last_accessed)",
+        [],
+      )
+      .map_err(|e| {
+        StashError::Store(
+          format!("Failed to create last_accessed index: {e}").into(),
+        )
+      })?;
+
+      tx.execute("PRAGMA user_version = 3", []).map_err(|e| {
+        StashError::Store(format!("Failed to set schema version: {e}").into())
+      })?;
+    }
+
+    tx.commit().map_err(|e| {
+      StashError::Store(
+        format!("Failed to commit migration transaction: {e}").into(),
+      )
+    })?;
 
     // Initialize Wayland state in background thread. This will be used to track
     // focused window state.
@@ -298,14 +369,27 @@ impl ClipboardDb for SqliteClipboardDb {
     self
       .conn
       .execute(
-        "INSERT INTO clipboard (contents, mime, content_hash) VALUES (?1, ?2, \
-         ?3)",
-        params![buf, mime, content_hash],
+        "INSERT INTO clipboard (contents, mime, content_hash, last_accessed) \
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+          buf,
+          mime,
+          content_hash,
+          std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_secs() as i64
+        ],
       )
       .map_err(|e| StashError::Store(e.to_string().into()))?;
 
+    let id = self
+      .conn
+      .query_row("SELECT last_insert_rowid()", [], |row| row.get(0))
+      .map_err(|e| StashError::Store(e.to_string().into()))?;
+
     self.trim_db(max_items)?;
-    Ok(self.next_sequence())
+    Ok(id)
   }
 
   fn deduplicate_by_hash(
@@ -920,4 +1004,354 @@ fn app_matches_exclusion(app_name: &str, excluded_apps: &[String]) -> bool {
 
   debug!("No match found for '{app_name}'");
   false
+}
+
+#[cfg(test)]
+mod tests {
+  use rusqlite::Connection;
+
+  use super::*;
+
+  fn get_schema_version(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.pragma_query_value(None, "user_version", |row| row.get(0))
+  }
+
+  fn table_column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+    let query = format!(
+      "SELECT sql FROM sqlite_master WHERE type='table' AND name='{}'",
+      table
+    );
+    match conn.query_row(&query, [], |row| row.get::<_, String>(0)) {
+      Ok(sql) => sql.contains(column),
+      Err(_) => false,
+    }
+  }
+
+  fn index_exists(conn: &Connection, index: &str) -> bool {
+    let query = "SELECT name FROM sqlite_master WHERE type='index' AND name=?1";
+    conn
+      .query_row(query, [index], |row| row.get::<_, String>(0))
+      .is_ok()
+  }
+
+  #[test]
+  fn test_fresh_database_v3_schema() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("test_fresh.db");
+    let conn = Connection::open(&db_path).expect("Failed to open database");
+
+    let db = SqliteClipboardDb::new(conn).expect("Failed to create database");
+
+    assert_eq!(
+      get_schema_version(&db.conn).expect("Failed to get schema version"),
+      3
+    );
+
+    assert!(table_column_exists(&db.conn, "clipboard", "content_hash"));
+    assert!(table_column_exists(&db.conn, "clipboard", "last_accessed"));
+
+    assert!(index_exists(&db.conn, "idx_content_hash"));
+    assert!(index_exists(&db.conn, "idx_last_accessed"));
+
+    db.conn
+      .execute(
+        "INSERT INTO clipboard (contents, mime, content_hash, last_accessed) \
+         VALUES (x'010203', 'text/plain', 12345, 1704067200)",
+        [],
+      )
+      .expect("Failed to insert test data");
+
+    let count: i64 = db
+      .conn
+      .query_row("SELECT COUNT(*) FROM clipboard", [], |row| row.get(0))
+      .expect("Failed to count");
+    assert_eq!(count, 1);
+  }
+
+  #[test]
+  fn test_migration_from_v0() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("test_v0.db");
+    let conn = Connection::open(&db_path).expect("Failed to open database");
+
+    conn
+      .execute_batch(
+        "CREATE TABLE IF NOT EXISTS clipboard (id INTEGER PRIMARY KEY \
+         AUTOINCREMENT, contents BLOB NOT NULL, mime TEXT);",
+      )
+      .expect("Failed to create table");
+
+    conn
+      .execute_batch(
+        "INSERT INTO clipboard (contents, mime) VALUES (x'010203', \
+         'text/plain')",
+      )
+      .expect("Failed to insert data");
+
+    assert_eq!(get_schema_version(&conn).expect("Failed to get version"), 0);
+
+    let db = SqliteClipboardDb::new(conn).expect("Failed to create database");
+
+    assert_eq!(
+      get_schema_version(&db.conn)
+        .expect("Failed to get version after migration"),
+      3
+    );
+
+    assert!(table_column_exists(&db.conn, "clipboard", "content_hash"));
+    assert!(table_column_exists(&db.conn, "clipboard", "last_accessed"));
+
+    let count: i64 = db
+      .conn
+      .query_row("SELECT COUNT(*) FROM clipboard", [], |row| row.get(0))
+      .expect("Failed to count");
+    assert_eq!(count, 1, "Existing data should be preserved");
+  }
+
+  #[test]
+  fn test_migration_from_v1() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("test_v1.db");
+    let conn = Connection::open(&db_path).expect("Failed to open database");
+
+    conn
+      .execute_batch(
+        "CREATE TABLE IF NOT EXISTS clipboard (id INTEGER PRIMARY KEY \
+         AUTOINCREMENT, contents BLOB NOT NULL, mime TEXT);",
+      )
+      .expect("Failed to create table");
+
+    conn
+      .pragma_update(None, "user_version", 1i64)
+      .expect("Failed to set version");
+
+    conn
+      .execute_batch(
+        "INSERT INTO clipboard (contents, mime) VALUES (x'010203', \
+         'text/plain')",
+      )
+      .expect("Failed to insert data");
+
+    let db = SqliteClipboardDb::new(conn).expect("Failed to create database");
+
+    assert_eq!(
+      get_schema_version(&db.conn)
+        .expect("Failed to get version after migration"),
+      3
+    );
+
+    assert!(table_column_exists(&db.conn, "clipboard", "content_hash"));
+    assert!(table_column_exists(&db.conn, "clipboard", "last_accessed"));
+
+    let count: i64 = db
+      .conn
+      .query_row("SELECT COUNT(*) FROM clipboard", [], |row| row.get(0))
+      .expect("Failed to count");
+    assert_eq!(count, 1, "Existing data should be preserved");
+  }
+
+  #[test]
+  fn test_migration_from_v2() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("test_v2.db");
+    let conn = Connection::open(&db_path).expect("Failed to open database");
+
+    conn
+      .execute_batch(
+        "CREATE TABLE IF NOT EXISTS clipboard (id INTEGER PRIMARY KEY \
+         AUTOINCREMENT, contents BLOB NOT NULL, mime TEXT, content_hash \
+         INTEGER);",
+      )
+      .expect("Failed to create table");
+
+    conn
+      .pragma_update(None, "user_version", 2i64)
+      .expect("Failed to set version");
+
+    conn
+      .execute_batch(
+        "INSERT INTO clipboard (contents, mime, content_hash) VALUES \
+         (x'010203', 'text/plain', 12345)",
+      )
+      .expect("Failed to insert data");
+
+    let db = SqliteClipboardDb::new(conn).expect("Failed to create database");
+
+    assert_eq!(
+      get_schema_version(&db.conn)
+        .expect("Failed to get version after migration"),
+      3
+    );
+
+    assert!(table_column_exists(&db.conn, "clipboard", "last_accessed"));
+    assert!(index_exists(&db.conn, "idx_last_accessed"));
+
+    let count: i64 = db
+      .conn
+      .query_row("SELECT COUNT(*) FROM clipboard", [], |row| row.get(0))
+      .expect("Failed to count");
+    assert_eq!(count, 1, "Existing data should be preserved");
+  }
+
+  #[test]
+  fn test_idempotent_migration() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("test_idempotent.db");
+    let conn = Connection::open(&db_path).expect("Failed to open database");
+
+    conn
+      .execute_batch(
+        "CREATE TABLE IF NOT EXISTS clipboard (id INTEGER PRIMARY KEY \
+         AUTOINCREMENT, contents BLOB NOT NULL, mime TEXT);",
+      )
+      .expect("Failed to create table");
+
+    let db = SqliteClipboardDb::new(conn).expect("Failed to create database");
+    let version_after_first =
+      get_schema_version(&db.conn).expect("Failed to get version");
+
+    let db2 =
+      SqliteClipboardDb::new(db.conn).expect("Failed to create database again");
+    let version_after_second =
+      get_schema_version(&db2.conn).expect("Failed to get version");
+
+    assert_eq!(version_after_first, version_after_second);
+    assert_eq!(version_after_first, 3);
+  }
+
+  #[test]
+  fn test_store_and_retrieve_with_new_columns() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("test_store.db");
+    let conn = Connection::open(&db_path).expect("Failed to open database");
+    let db = SqliteClipboardDb::new(conn).expect("Failed to create database");
+
+    let test_data = b"Hello, World!";
+    let cursor = std::io::Cursor::new(test_data.to_vec());
+
+    let id = db
+      .store_entry(cursor, 100, 1000, None)
+      .expect("Failed to store entry");
+
+    let content_hash: Option<i64> = db
+      .conn
+      .query_row(
+        "SELECT content_hash FROM clipboard WHERE id = ?1",
+        [id],
+        |row| row.get(0),
+      )
+      .expect("Failed to get content_hash");
+
+    let last_accessed: Option<i64> = db
+      .conn
+      .query_row(
+        "SELECT last_accessed FROM clipboard WHERE id = ?1",
+        [id],
+        |row| row.get(0),
+      )
+      .expect("Failed to get last_accessed");
+
+    assert!(content_hash.is_some(), "content_hash should be set");
+    assert!(last_accessed.is_some(), "last_accessed should be set");
+  }
+
+  #[test]
+  fn test_last_accessed_updated_on_copy() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("test_copy.db");
+    let conn = Connection::open(&db_path).expect("Failed to open database");
+    let db = SqliteClipboardDb::new(conn).expect("Failed to create database");
+
+    let test_data = b"Test content for copy";
+    let cursor = std::io::Cursor::new(test_data.to_vec());
+    let id_a = db
+      .store_entry(cursor, 100, 1000, None)
+      .expect("Failed to store entry A");
+
+    let original_last_accessed: i64 = db
+      .conn
+      .query_row(
+        "SELECT last_accessed FROM clipboard WHERE id = ?1",
+        [id_a],
+        |row| row.get(0),
+      )
+      .expect("Failed to get last_accessed");
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    test_data.hash(&mut hasher);
+    let content_hash = hasher.finish() as i64;
+
+    let now = std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .expect("Time went backwards")
+      .as_secs() as i64;
+
+    db.conn
+      .execute(
+        "INSERT INTO clipboard (contents, mime, content_hash, last_accessed) \
+         VALUES (?1, ?2, ?3, ?4)",
+        params![test_data as &[u8], "text/plain", content_hash, now],
+      )
+      .expect("Failed to insert entry B directly");
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+
+    let (..) = db.copy_entry(id_a).expect("Failed to copy entry");
+
+    let new_last_accessed: i64 = db
+      .conn
+      .query_row(
+        "SELECT last_accessed FROM clipboard WHERE id = ?1",
+        [id_a],
+        |row| row.get(0),
+      )
+      .expect("Failed to get updated last_accessed");
+
+    assert!(
+      new_last_accessed > original_last_accessed,
+      "last_accessed should be updated when copying an entry that is not the \
+       most recent"
+    );
+  }
+
+  #[test]
+  fn test_migration_with_existing_columns_but_v0() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("test_v0_with_cols.db");
+    let conn = Connection::open(&db_path).expect("Failed to open database");
+
+    conn
+      .execute_batch(
+        "CREATE TABLE IF NOT EXISTS clipboard (id INTEGER PRIMARY KEY \
+         AUTOINCREMENT, contents BLOB NOT NULL, mime TEXT, content_hash \
+         INTEGER, last_accessed INTEGER);",
+      )
+      .expect("Failed to create table with all columns");
+
+    conn
+      .pragma_update(None, "user_version", 0i64)
+      .expect("Failed to set version to 0");
+
+    conn
+      .execute_batch(
+        "INSERT INTO clipboard (contents, mime, content_hash, last_accessed) \
+         VALUES (x'010203', 'text/plain', 12345, 1704067200)",
+      )
+      .expect("Failed to insert data");
+
+    let db = SqliteClipboardDb::new(conn).expect("Failed to create database");
+
+    assert_eq!(
+      get_schema_version(&db.conn).expect("Failed to get version"),
+      3
+    );
+
+    let count: i64 = db
+      .conn
+      .query_row("SELECT COUNT(*) FROM clipboard", [], |row| row.get(0))
+      .expect("Failed to count");
+    assert_eq!(count, 1, "Existing data should be preserved");
+  }
 }
