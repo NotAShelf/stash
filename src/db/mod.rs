@@ -256,6 +256,46 @@ impl SqliteClipboardDb {
       })?;
     }
 
+    // Add expires_at column if it doesn't exist (v4)
+    if schema_version < 4 {
+      let has_expires_at: bool = tx
+        .query_row(
+          "SELECT sql FROM sqlite_master WHERE type='table' AND \
+           name='clipboard'",
+          [],
+          |row| {
+            let sql: String = row.get(0)?;
+            Ok(sql.to_lowercase().contains("expires_at"))
+          },
+        )
+        .unwrap_or(false);
+
+      if !has_expires_at {
+        tx.execute("ALTER TABLE clipboard ADD COLUMN expires_at REAL", [])
+          .map_err(|e| {
+            StashError::Store(
+              format!("Failed to add expires_at column: {e}").into(),
+            )
+          })?;
+      }
+
+      // Create partial index for expires_at (only index non-NULL values)
+      tx.execute(
+        "CREATE INDEX IF NOT EXISTS idx_expires_at ON clipboard(expires_at) \
+         WHERE expires_at IS NOT NULL",
+        [],
+      )
+      .map_err(|e| {
+        StashError::Store(
+          format!("Failed to create expires_at index: {e}").into(),
+        )
+      })?;
+
+      tx.execute("PRAGMA user_version = 4", []).map_err(|e| {
+        StashError::Store(format!("Failed to set schema version: {e}").into())
+      })?;
+    }
+
     tx.commit().map_err(|e| {
       StashError::Store(
         format!("Failed to commit migration transaction: {e}").into(),
@@ -650,6 +690,93 @@ impl ClipboardDb for SqliteClipboardDb {
       Ok(Some(max_id)) => max_id + 1,
       Ok(None) | Err(_) => 1,
     }
+  }
+}
+
+impl SqliteClipboardDb {
+  /// Get current Unix timestamp with sub-second precision
+  pub fn now() -> f64 {
+    std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .unwrap()
+      .as_secs_f64()
+  }
+
+  /// Clean up all expired entries. Returns count deleted.
+  pub fn cleanup_expired(&self) -> Result<usize, StashError> {
+    let now = Self::now();
+    self
+      .conn
+      .execute(
+        "DELETE FROM clipboard WHERE expires_at IS NOT NULL AND expires_at <= \
+         ?1",
+        [now],
+      )
+      .map_err(|e| StashError::Trim(e.to_string().into()))
+  }
+
+  /// Get expired entries (for --expired flag diagnostic output)
+  pub fn get_expired_entries(
+    &self,
+  ) -> Result<Vec<(i64, Vec<u8>, Option<String>)>, StashError> {
+    let now = Self::now();
+    let mut stmt = self
+      .conn
+      .prepare(
+        "SELECT id, contents, mime FROM clipboard WHERE expires_at IS NOT \
+         NULL AND expires_at <= ?1 ORDER BY expires_at ASC",
+      )
+      .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+    let mut rows = stmt
+      .query([now])
+      .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+    let mut entries = Vec::new();
+    while let Some(row) = rows
+      .next()
+      .map_err(|e| StashError::ListDecode(e.to_string().into()))?
+    {
+      let id: i64 = row
+        .get(0)
+        .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+      let contents: Vec<u8> = row
+        .get(1)
+        .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+      let mime: Option<String> = row
+        .get(2)
+        .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+      entries.push((id, contents, mime));
+    }
+    Ok(entries)
+  }
+
+  /// Get the earliest expiration (timestamp, id) for heap initialization
+  pub fn get_next_expiration(&self) -> Result<Option<(f64, i64)>, StashError> {
+    match self.conn.query_row(
+      "SELECT expires_at, id FROM clipboard WHERE expires_at IS NOT NULL \
+       ORDER BY expires_at ASC LIMIT 1",
+      [],
+      |row| Ok((row.get(0)?, row.get(1)?)),
+    ) {
+      Ok(result) => Ok(Some(result)),
+      Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+      Err(e) => Err(StashError::Store(e.to_string().into())),
+    }
+  }
+
+  /// Set expiration timestamp for an entry
+  pub fn set_expiration(
+    &self,
+    id: i64,
+    expires_at: f64,
+  ) -> Result<(), StashError> {
+    self
+      .conn
+      .execute(
+        "UPDATE clipboard SET expires_at = ?2 WHERE id = ?1",
+        params![id, expires_at],
+      )
+      .map_err(|e| StashError::Store(e.to_string().into()))?;
+    Ok(())
   }
 }
 
