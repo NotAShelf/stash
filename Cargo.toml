@@ -1,7 +1,7 @@
 [package]
 name = "stash-clipboard"
 description = "Wayland clipboard manager with fast persistent history and multi-media support"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2024"
 authors = ["NotAShelf <raf@notashelf.dev>"]
 license = "MPL-2.0"
