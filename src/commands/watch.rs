@@ -107,23 +107,17 @@ impl WatchCommand for SqliteClipboardDb {
     smol::block_on(async {
       log::info!("Starting clipboard watch daemon");
 
-      // Cleanup any already-expired entries on startup
-      if let Ok(count) = self.cleanup_expired() {
-        if count > 0 {
-          log::info!("Cleaned up {} expired entries on startup", count);
-        }
-      }
-
       // Build expiration queue from existing entries
       let mut exp_queue = ExpirationQueue::new();
       if let Ok(Some((expires_at, id))) = self.get_next_expiration() {
         exp_queue.push(expires_at, id);
-        // Load remaining expirations
+        // Load remaining expirations (exclude already-marked expired entries)
         let mut stmt = self
           .conn
           .prepare(
             "SELECT expires_at, id FROM clipboard WHERE expires_at IS NOT \
-             NULL ORDER BY expires_at ASC",
+             NULL AND (is_expired IS NULL OR is_expired = 0) ORDER BY \
+             expires_at ASC",
           )
           .ok();
         if let Some(ref mut stmt) = stmt {
@@ -189,11 +183,15 @@ impl WatchCommand for SqliteClipboardDb {
                 )
                 .is_ok();
               if exists {
+                // Mark as expired instead of deleting
                 self
                   .conn
-                  .execute("DELETE FROM clipboard WHERE id = ?1", [id])
+                  .execute(
+                    "UPDATE clipboard SET is_expired = 1 WHERE id = ?1",
+                    [id],
+                  )
                   .ok();
-                log::info!("Entry {id} expired and removed");
+                log::info!("Entry {id} marked as expired");
               }
             }
           } else {
