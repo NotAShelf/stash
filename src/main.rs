@@ -8,7 +8,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use inquire::Confirm;
 
 mod commands;
-mod db;
+pub(crate) mod db;
 mod multicall;
 #[cfg(feature = "use-toplevel")] mod wayland;
 

@@ -1712,6 +1712,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smol",
+ "tempfile",
  "thiserror",
  "unicode-segmentation",
  "unicode-width 0.2.0",

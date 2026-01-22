@@ -47,6 +47,9 @@ wayland-client = { version = "0.31.11", features = ["log"], optional = true }
 wayland-protocols-wlr = { version = "0.3.9", default-features = false, optional = true }
 notify-rust = { version = "4.11.7", optional = true }
 
+[dev-dependencies]
+tempfile = "3.18.0"
+
 [profile.release]
 lto = true
 opt-level = "z"
