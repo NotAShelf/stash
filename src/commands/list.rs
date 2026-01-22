@@ -247,10 +247,13 @@ impl SqliteClipboardDb {
           .map_err(|e| StashError::ListDecode(e.to_string().into()))?
           && let Event::Key(key) = event::read()
             .map_err(|e| StashError::ListDecode(e.to_string().into()))?
-          {
-            match (key.code, key.modifiers) {
-              (KeyCode::Char('q') | KeyCode::Esc, _) => break,
-              (KeyCode::Down | KeyCode::Char('j'), _) => {
+        {
+          match (key.code, key.modifiers) {
+            (KeyCode::Char('q') | KeyCode::Esc, _) => break,
+            (KeyCode::Down | KeyCode::Char('j'), _) => {
+              if entries.is_empty() {
+                state.select(None);
+              } else {
                 let i = match state.selected() {
                   Some(i) => {
                     if i >= entries.len() - 1 {
@@ -262,8 +265,12 @@ impl SqliteClipboardDb {
                   None => 0,
                 };
                 state.select(Some(i));
-              },
-              (KeyCode::Up | KeyCode::Char('k'), _) => {
+              }
+            },
+            (KeyCode::Up | KeyCode::Char('k'), _) => {
+              if entries.is_empty() {
+                state.select(None);
+              } else {
                 let i = match state.selected() {
                   Some(i) => {
                     if i == 0 {
@@ -275,94 +282,89 @@ impl SqliteClipboardDb {
                   None => 0,
                 };
                 state.select(Some(i));
-              },
-              (KeyCode::Enter, _) => {
-                if let Some(idx) = state.selected()
-                  && let Some((id, ..)) = entries.get(idx) {
-                    match self.copy_entry(*id) {
-                      Ok((new_id, contents, mime)) => {
-                        if new_id != *id {
-                          entries[idx] = (
-                            new_id,
-                            entries[idx].1.clone(),
-                            entries[idx].2.clone(),
-                          );
-                        }
-                        let opts = Options::new();
-                        let mime_type = match mime {
-                          Some(ref m) if m == "text/plain" => MimeType::Text,
-                          Some(ref m) => {
-                            MimeType::Specific(m.clone().to_owned())
-                          },
-                          None => MimeType::Text,
-                        };
-                        let copy_result = opts.copy(
-                          Source::Bytes(contents.clone().into()),
-                          mime_type,
-                        );
-                        match copy_result {
-                          Ok(()) => {
-                            let _ = Notification::new()
-                              .summary("Stash")
-                              .body("Copied entry to clipboard")
-                              .show();
-                          },
-                          Err(e) => {
-                            log::error!(
-                              "Failed to copy entry to clipboard: {e}"
-                            );
-                            let _ = Notification::new()
-                              .summary("Stash")
-                              .body(&format!(
-                                "Failed to copy to clipboard: {e}"
-                              ))
-                              .show();
-                          },
-                        }
-                      },
-                      Err(e) => {
-                        log::error!("Failed to fetch entry {id}: {e}");
+              }
+            },
+            (KeyCode::Enter, _) => {
+              if let Some(idx) = state.selected()
+                && let Some((id, ..)) = entries.get(idx)
+              {
+                match self.copy_entry(*id) {
+                  Ok((new_id, contents, mime)) => {
+                    if new_id != *id {
+                      entries[idx] = (
+                        new_id,
+                        entries[idx].1.clone(),
+                        entries[idx].2.clone(),
+                      );
+                    }
+                    let opts = Options::new();
+                    let mime_type = match mime {
+                      Some(ref m) if m == "text/plain" => MimeType::Text,
+                      Some(ref m) => MimeType::Specific(m.clone().to_owned()),
+                      None => MimeType::Text,
+                    };
+                    let copy_result = opts
+                      .copy(Source::Bytes(contents.clone().into()), mime_type);
+                    match copy_result {
+                      Ok(()) => {
                         let _ = Notification::new()
                           .summary("Stash")
-                          .body(&format!("Failed to fetch entry: {e}"))
+                          .body("Copied entry to clipboard")
+                          .show();
+                      },
+                      Err(e) => {
+                        log::error!("Failed to copy entry to clipboard: {e}");
+                        let _ = Notification::new()
+                          .summary("Stash")
+                          .body(&format!("Failed to copy to clipboard: {e}"))
                           .show();
                       },
                     }
-                  }
-              },
-              (KeyCode::Char('D'), KeyModifiers::SHIFT) => {
-                if let Some(idx) = state.selected()
-                  && let Some((id, ..)) = entries.get(idx) {
-                    // Delete entry from DB
-                    self
-                      .conn
-                      .execute(
-                        "DELETE FROM clipboard WHERE id = ?1",
-                        rusqlite::params![id],
-                      )
-                      .map_err(|e| {
-                        StashError::DeleteEntry(*id, e.to_string().into())
-                      })?;
-                    // Remove from entries and update selection
-                    entries.remove(idx);
-                    let new_len = entries.len();
-                    if new_len == 0 {
-                      state.select(None);
-                    } else if idx >= new_len {
-                      state.select(Some(new_len - 1));
-                    } else {
-                      state.select(Some(idx));
-                    }
-                    // Show notification
+                  },
+                  Err(e) => {
+                    log::error!("Failed to fetch entry {id}: {e}");
                     let _ = Notification::new()
                       .summary("Stash")
-                      .body("Deleted entry")
+                      .body(&format!("Failed to fetch entry: {e}"))
                       .show();
-                  }
-              },
-              _ => {},
-            }
+                  },
+                }
+              }
+            },
+            (KeyCode::Char('D'), KeyModifiers::SHIFT) => {
+              if let Some(idx) = state.selected()
+                && let Some((id, ..)) = entries.get(idx)
+              {
+                // Delete entry from DB
+                self
+                  .conn
+                  .execute(
+                    "DELETE FROM clipboard WHERE id = ?1",
+                    rusqlite::params![id],
+                  )
+                  .map_err(|e| {
+                    StashError::DeleteEntry(*id, e.to_string().into())
+                  })?;
+                // Remove from entries and update selection
+                entries.remove(idx);
+                let new_len = entries.len();
+                if new_len == 0 {
+                  state.select(None);
+                } else if idx >= new_len {
+                  state.select(Some(new_len - 1));
+                } else {
+                  state.select(Some(idx));
+                }
+                // Show notification
+                let _ = Notification::new()
+                  .summary("Stash")
+                  .body("Deleted entry")
+                  .show();
+              }
+            },
+            _ => {},
           }
+        }
       }
       Ok(())
     })();
