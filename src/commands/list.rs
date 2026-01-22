@@ -6,8 +6,12 @@ use unicode_width::UnicodeWidthStr;
 use crate::db::{ClipboardDb, SqliteClipboardDb, StashError};
 
 pub trait ListCommand {
-  fn list(&self, out: impl Write, preview_width: u32)
-  -> Result<(), StashError>;
+  fn list(
+    &self,
+    out: impl Write,
+    preview_width: u32,
+    include_expired: bool,
+  ) -> Result<(), StashError>;
 }
 
 impl ListCommand for SqliteClipboardDb {
@@ -15,14 +19,21 @@ impl ListCommand for SqliteClipboardDb {
     &self,
     out: impl Write,
     preview_width: u32,
+    include_expired: bool,
   ) -> Result<(), StashError> {
-    self.list_entries(out, preview_width).map(|_| ())
+    self
+      .list_entries(out, preview_width, include_expired)
+      .map(|_| ())
   }
 }
 
 impl SqliteClipboardDb {
   #[allow(clippy::too_many_lines)]
-  pub fn list_tui(&self, preview_width: u32) -> Result<(), StashError> {
+  pub fn list_tui(
+    &self,
+    preview_width: u32,
+    include_expired: bool,
+  ) -> Result<(), StashError> {
     use std::io::stdout;
 
     use crossterm::{
@@ -53,12 +64,16 @@ impl SqliteClipboardDb {
     use wl_clipboard_rs::copy::{MimeType, Options, Source};
 
     // Query entries from DB
+    let query = if include_expired {
+      "SELECT id, contents, mime FROM clipboard ORDER BY last_accessed DESC, \
+       id DESC"
+    } else {
+      "SELECT id, contents, mime FROM clipboard WHERE (is_expired IS NULL OR \
+       is_expired = 0) ORDER BY last_accessed DESC, id DESC"
+    };
     let mut stmt = self
       .conn
-      .prepare(
-        "SELECT id, contents, mime FROM clipboard ORDER BY last_accessed \
-         DESC, id DESC",
-      )
+      .prepare(query)
       .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
     let mut rows = stmt
       .query([])
