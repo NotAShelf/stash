@@ -6,12 +6,19 @@ use std::{
 };
 
 use smol::Timer;
-use wl_clipboard_rs::paste::{ClipboardType, Seat, get_contents};
+use wl_clipboard_rs::{
+  copy::{MimeType as CopyMimeType, Options, Source},
+  paste::{ClipboardType, Seat, get_contents},
+};
 
 use crate::db::{ClipboardDb, SqliteClipboardDb};
 
-/// Wrapper to provide Ord implementation for f64 by negating values.
-/// This allows BinaryHeap (which is a max-heap) to function as a min-heap.
+/// Wrapper to provide [`Ord`] implementation for `f64` by negating values.
+/// This allows [`BinaryHeap`], which is a max-heap, to function as a min-heap.
+/// Also see:
+///  - <https://doc.rust-lang.org/std/cmp/struct.Reverse.html>
+///  - <https://doc.rust-lang.org/std/primitive.f64.html#method.total_cmp>
+///  - <https://docs.rs/ordered-float/latest/ordered_float/>
 #[derive(Debug, Clone, Copy)]
 struct Neg(f64);
 
@@ -173,17 +180,18 @@ impl WatchCommand for SqliteClipboardDb {
             // Expired entries to process
             let expired_ids = exp_queue.pop_expired(now);
             for id in expired_ids {
-              // Verify entry still exists (handles stale heap entries)
-              let exists = self
+              // Verify entry still exists and get its content_hash
+              let expired_hash: Option<i64> = self
                 .conn
                 .query_row(
-                  "SELECT 1 FROM clipboard WHERE id = ?1",
+                  "SELECT content_hash FROM clipboard WHERE id = ?1",
                   [id],
-                  |_| Ok(()),
+                  |row| row.get(0),
                 )
-                .is_ok();
-              if exists {
-                // Mark as expired instead of deleting
+                .ok();
+
+              if let Some(stored_hash) = expired_hash {
+                // Mark as expired
                 self
                   .conn
                   .execute(
@@ -192,13 +200,52 @@ impl WatchCommand for SqliteClipboardDb {
                   )
                   .ok();
                 log::info!("Entry {id} marked as expired");
+
+                // Check if this expired entry is currently in the clipboard
+                if let Ok((mut reader, _)) = get_contents(
+                  ClipboardType::Regular,
+                  Seat::Unspecified,
+                  wl_clipboard_rs::paste::MimeType::Any,
+                ) {
+                  let mut current_buf = Vec::new();
+                  if reader.read_to_end(&mut current_buf).is_ok()
+                    && !current_buf.is_empty()
+                  {
+                    let current_hash = hash_contents(&current_buf);
+                    // Compare as i64 (database stores as i64)
+                    if current_hash as i64 == stored_hash {
+                      // Clear the clipboard since expired content is still
+                      // there
+                      let mut opts = Options::new();
+                      opts.clipboard(
+                        wl_clipboard_rs::copy::ClipboardType::Regular,
+                      );
+                      if opts
+                        .copy(
+                          Source::Bytes(Vec::new().into()),
+                          CopyMimeType::Autodetect,
+                        )
+                        .is_ok()
+                      {
+                        log::info!(
+                          "Cleared clipboard containing expired entry {id}"
+                        );
+                        last_hash = None; // reset tracked hash
+                      } else {
+                        log::warn!(
+                          "Failed to clear clipboard for expired entry {id}"
+                        );
+                      }
+                    }
+                  }
+                }
               }
             }
           } else {
-            // Sleep precisely until next expiration (sub-second precision)
+            // Sleep *precisely* until next expiration
             let sleep_duration = next_exp - now;
             Timer::after(Duration::from_secs_f64(sleep_duration)).await;
-            continue; // Skip normal poll, process expirations first
+            continue; // skip normal poll, process expirations first
           }
         }
 
