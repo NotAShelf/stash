@@ -725,6 +725,7 @@ pub fn detect_mime(data: &[u8]) -> Option<String> {
       ImageType::Qoi => "image/qoi",
       ImageType::Tga => "image/x-tga",
       ImageType::Vtf => "image/x-vtf",
+      ImageType::Heif(imagesize::Compression::Hevc) => "image/heic",
       ImageType::Heif(_) => "image/heif",
       _ => "application/octet-stream",
     };
