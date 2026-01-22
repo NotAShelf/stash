@@ -2,9 +2,11 @@ use std::{
   env,
   io::{self, IsTerminal},
   path::PathBuf,
+  time::Duration,
 };
 
 use clap::{CommandFactory, Parser, Subcommand};
+use humantime::parse_duration;
 use inquire::Confirm;
 
 mod commands;
@@ -71,6 +73,10 @@ enum Command {
     /// Output format: "tsv" (default) or "json"
     #[arg(long, value_parser = ["tsv", "json"])]
     format: Option<String>,
+
+    /// Show only expired entries (diagnostic, does not remove them)
+    #[arg(long)]
+    expired: bool,
   },
 
   /// Decode and output clipboard entry by id
@@ -111,7 +117,11 @@ enum Command {
   },
 
   /// Start a process to watch clipboard for changes and store automatically.
-  Watch,
+  Watch {
+    /// Expire new entries after duration (e.g., "3s", "500ms", "1h30m").
+    #[arg(long, value_parser = parse_duration)]
+    expire_after: Option<Duration>,
+  },
 }
 
 fn report_error<T>(
@@ -186,40 +196,67 @@ fn main() -> color_eyre::eyre::Result<()> {
           "failed to store entry",
         );
       },
-      Some(Command::List { format }) => {
-        match format.as_deref() {
-          Some("tsv") => {
-            report_error(
-              db.list(io::stdout(), cli.preview_width),
-              "failed to list entries",
-            );
-          },
-          Some("json") => {
-            match db.list_json() {
-              Ok(json) => {
-                println!("{json}");
-              },
-              Err(e) => {
-                log::error!("failed to list entries as JSON: {e}");
-              },
+      Some(Command::List { format, expired }) => {
+        if expired {
+          // Diagnostic mode: show expired entries only (does not cleanup)
+          match db.get_expired_entries() {
+            Ok(entries) => {
+              for (id, contents, mime) in entries {
+                let preview = db::preview_entry(
+                  &contents,
+                  mime.as_deref(),
+                  cli.preview_width,
+                );
+                println!("{id}\t{preview}");
+              }
+            },
+            Err(e) => {
+              log::error!("failed to list expired entries: {e}");
+            },
+          }
+        } else {
+          // Normal list mode
+          // Cleanup expired entries when daemon is not running
+          if let Ok(count) = db.cleanup_expired() {
+            if count > 0 {
+              log::info!("Cleaned up {} expired entries", count);
             }
-          },
-          Some(other) => {
-            log::error!("unsupported format: {other}");
-          },
-          None => {
-            if std::io::stdout().is_terminal() {
-              report_error(
-                db.list_tui(cli.preview_width),
-                "failed to list entries in TUI",
-              );
-            } else {
+          }
+
+          match format.as_deref() {
+            Some("tsv") => {
               report_error(
                 db.list(io::stdout(), cli.preview_width),
                 "failed to list entries",
               );
-            }
-          },
+            },
+            Some("json") => {
+              match db.list_json() {
+                Ok(json) => {
+                  println!("{json}");
+                },
+                Err(e) => {
+                  log::error!("failed to list entries as JSON: {e}");
+                },
+              }
+            },
+            Some(other) => {
+              log::error!("unsupported format: {other}");
+            },
+            None => {
+              if std::io::stdout().is_terminal() {
+                report_error(
+                  db.list_tui(cli.preview_width),
+                  "failed to list entries in TUI",
+                );
+              } else {
+                report_error(
+                  db.list(io::stdout(), cli.preview_width),
+                  "failed to list entries",
+                );
+              }
+            },
+          }
         }
       },
       Some(Command::Decode { input }) => {
@@ -334,7 +371,7 @@ fn main() -> color_eyre::eyre::Result<()> {
           }
         }
       },
-      Some(Command::Watch) => {
+      Some(Command::Watch { expire_after }) => {
         db.watch(
           cli.max_dedupe_search,
           cli.max_items,
@@ -342,6 +379,7 @@ fn main() -> color_eyre::eyre::Result<()> {
           &cli.excluded_apps,
           #[cfg(not(feature = "use-toplevel"))]
           &[],
+          expire_after,
         );
       },
 
