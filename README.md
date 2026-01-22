@@ -45,8 +45,9 @@ with many features such as but not necessarily limited to:
   - Import clipboard history from TSV (e.g., from `cliphist list`)
 - Image preview (shows dimensions and format)
 - Text previews with customizable width
-- Deduplication and entry limit control
+- De-duplication, whitespace prevention and entry limit control
 - Automatic clipboard monitoring with `stash watch`
+  - Configurable auto-expiry of old entries in watch mode as a safety buffer
 - Drop-in replacement for `wl-clipboard` tools (`wl-copy` and `wl-paste`)
 - Sensitive clipboard filtering via regex (see below)
 - Sensitive clipboard filtering by application (see below)
@@ -141,7 +142,7 @@ Commands:
   list    List clipboard history
   decode  Decode and output clipboard entry by id
   delete  Delete clipboard entry by id (if numeric), or entries matching a query (if not). Numeric arguments are treated as ids. Use --type to specify explicitly
-  wipe    Wipe all clipboard history
+  db      Database management operations
   import  Import clipboard data from stdin (default: TSV format)
   watch   Start a process to watch clipboard for changes and store automatically
   help    Print this message or the help of the given subcommand(s)
@@ -154,7 +155,7 @@ Options:
       --preview-width <PREVIEW_WIDTH>
           Maximum width (in characters) for clipboard entry previews in list output [default: 100]
       --db-path <DB_PATH>
-          Path to the `SQLite` clipboard database file
+          Path to the `SQLite` clipboard database file [env: STASH_DB_PATH=]
       --excluded-apps <EXCLUDED_APPS>
           Application names to exclude from clipboard history [env: STASH_EXCLUDED_APPS=]
       --ask
@@ -188,6 +189,11 @@ and copying/deleting entries. This behaviour is EXCLUSIVE TO TTYs and Stash will
 display entries in Cliphist-compatible TSV format in Bash scripts. You may also
 enforce the output format with `stash list --format <tsv | json>`.
 
+You may also view your clipboard _with the addition of expired entries_, i.e.,
+entries that have reached their TTL and are marked as expired, using the
+`--expired` flag as `stash list --expired`. Expired entries are not cleaned up
+when using this flag, allowing you to inspect them before running cleanup.
+
 ### Decode an entry by ID
 
 ```bash
@@ -219,9 +225,32 @@ stash delete --type id < ids.txt
 
 ### Wipe all entries
 
+> [!WARNING]
+> This command is deprecated, and will be removed in v0.4.0. Use `stash db wipe`
+> instead.
+
 ```bash
 stash wipe
 ```
+
+### Database management
+
+Stash provides a `db` subcommand for database maintenance operations:
+
+```bash
+stash db wipe [--expired] [--ask]
+stash db vacuum
+stash db stats
+```
+
+- `stash db wipe`: Remove all entries from the database. Use `--expired` to only
+  wipe expired entries instead of all entries. Requires `--ask` confirmation by
+  default.
+- `stash db vacuum`: Optimize the database using SQLite's VACUUM command,
+  reclaiming space and improving performance.
+- `stash db stats`: Display database statistics including total/active/expired
+  entry counts, storage size, and page information. This is provided purely for
+  convenience and the rule of the cool.
 
 ### Watch clipboard for changes and store automatically
 
@@ -235,13 +264,16 @@ automatically. This is designed as an alternative to shelling out to
 premade Systemd service in `contrib/`. Packagers are encouraged to vendor the
 service unless adding their own.
 
-> [!TIP]
-> Stash provides `wl-copy` and `wl-paste` binaries for backwards compatibility
-> with the `wl-clipboard` tools. If _must_ depend on those binaries by name, you
-> may simply use the `wl-copy` and `wl-paste` provided as `wl-clipboard-rs`
-> wrappers on your system. In other words, you can use
-> `wl-paste --watch stash store` as an alternative to `stash watch` if
-> preferred.
+#### Automatic Clipboard Clearing on Expiration
+
+When `stash watch` is running and a clipboard entry expires, Stash will detect
+if the current clipboard still contains that expired content and automatically
+clear it. This prevents stale data from remaining in your clipboard after an
+entry has expired from history.
+
+> [!NOTE]
+> This behavior only applies when the watch daemon is actively running. Manual
+> expiration or deletion of entries will not clear the clipboard.
 
 ### Options
 
@@ -405,6 +437,86 @@ figured out something new, e.g. a neat shell trick, feel free to add it here!
    installed by default but other package managers may need additional steps by
    the packagers. While building from source, you may link
    `target/release/stash` manually.
+
+### Entry Expiration
+
+Stash supports time-to-live (TTL) for clipboard entries. When an entry's
+expiration time is reached, it is marked as expired rather than immediately
+deleted. This allows for inspection of expired entries and automatic clipboard
+cleanup.
+
+#### How Expiration Works
+
+When `stash watch` is running with `--expire-after`, it monitors the clipboard
+and processes expired entries periodically. Upon expiration:
+
+1. The entry's `is_expired` flag is set to `1` in the database
+2. If the current clipboard content matches the expired entry, Stash clears the
+   clipboard to prevent pasting stale data
+3. Expired entries are excluded from normal list operations unless `--expired`
+   is specified
+
+> [!NOTE]
+> By default, entries do not expire. Use `stash watch --expire-after DURATION`
+> to enable expiration (e.g., `--expire-after 24h` for 24-hour TTL).
+
+#### Viewing Expired Entries
+
+Use `stash list --expired` to include expired entries in the output. This is
+useful for:
+
+- Inspecting what has expired from your clipboard history
+- Verifying that sensitive data has been properly expired
+- Debugging expiration behavior
+
+```bash
+# View all entries including expired ones
+stash list --expired
+
+# View expired entries in JSON format
+stash list --expired --format json
+```
+
+#### Cleaning Up Expired Entries
+
+The watch daemon automatically cleans up expired entries when it processes them.
+For manual cleanup, use:
+
+```bash
+# Remove all expired entries from the database
+stash db wipe --expired
+```
+
+> [!NOTE]
+> If you have a large number of expired entries, consider running
+> `stash db vacuum` afterward to reclaim disk space.
+
+#### Automatic Clipboard Clearing
+
+When `stash watch` is running and an entry expires, Stash checks if the current
+clipboard still contains that expired content. If it matches, Stash clears the
+clipboard automatically. This prevents accidentally pasting outdated content.
+
+> [!TIP]
+> This behavior only applies when the watch daemon is actively running. Manual
+> expiration or deletion of entries will not clear the clipboard.
+
+#### Database Maintenance
+
+Stash uses SQLite for persistent storage. Over time, deleted entries and
+fragmentation can affect performance. Use the `stash db` command to maintain
+your database:
+
+- **Check statistics**: `stash db stats` shows entry counts and storage usage.
+  Use this to monitor growth and decide when to clean up.
+- **Remove expired entries**: `stash db wipe --expired` removes entries that
+  have reached their TTL. The daemon normally handles this, but this is useful
+  for manual cleanup.
+- **Optimize storage**: `stash db vacuum` runs SQLite's VACUUM command to
+  reclaim space and defragment the database. This is safe to run periodically.
+
+It is recommended to run `stash db vacuum` occasionally (e.g., monthly) to keep
+the database compact, especially after deleting many entries.
 
 ## Attributions
 
