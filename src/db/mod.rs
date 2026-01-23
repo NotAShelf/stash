@@ -80,6 +80,7 @@ pub trait ClipboardDb {
     &self,
     out: impl Write,
     preview_width: u32,
+    include_expired: bool,
   ) -> Result<usize, StashError>;
   fn decode_entry(
     &self,
@@ -93,7 +94,6 @@ pub trait ClipboardDb {
     &self,
     id: i64,
   ) -> Result<(i64, Vec<u8>, Option<String>), StashError>;
-  fn next_sequence(&self) -> i64;
 }
 
 #[derive(Serialize, Deserialize)]
@@ -256,6 +256,89 @@ impl SqliteClipboardDb {
       })?;
     }
 
+    // Add expires_at column if it doesn't exist (v4)
+    if schema_version < 4 {
+      let has_expires_at: bool = tx
+        .query_row(
+          "SELECT sql FROM sqlite_master WHERE type='table' AND \
+           name='clipboard'",
+          [],
+          |row| {
+            let sql: String = row.get(0)?;
+            Ok(sql.to_lowercase().contains("expires_at"))
+          },
+        )
+        .unwrap_or(false);
+
+      if !has_expires_at {
+        tx.execute("ALTER TABLE clipboard ADD COLUMN expires_at REAL", [])
+          .map_err(|e| {
+            StashError::Store(
+              format!("Failed to add expires_at column: {e}").into(),
+            )
+          })?;
+      }
+
+      // Create partial index for expires_at (only index non-NULL values)
+      tx.execute(
+        "CREATE INDEX IF NOT EXISTS idx_expires_at ON clipboard(expires_at) \
+         WHERE expires_at IS NOT NULL",
+        [],
+      )
+      .map_err(|e| {
+        StashError::Store(
+          format!("Failed to create expires_at index: {e}").into(),
+        )
+      })?;
+
+      tx.execute("PRAGMA user_version = 4", []).map_err(|e| {
+        StashError::Store(format!("Failed to set schema version: {e}").into())
+      })?;
+    }
+
+    // Add is_expired column if it doesn't exist (v5)
+    if schema_version < 5 {
+      let has_is_expired: bool = tx
+        .query_row(
+          "SELECT sql FROM sqlite_master WHERE type='table' AND \
+           name='clipboard'",
+          [],
+          |row| {
+            let sql: String = row.get(0)?;
+            Ok(sql.to_lowercase().contains("is_expired"))
+          },
+        )
+        .unwrap_or(false);
+
+      if !has_is_expired {
+        tx.execute(
+          "ALTER TABLE clipboard ADD COLUMN is_expired INTEGER DEFAULT 0",
+          [],
+        )
+        .map_err(|e| {
+          StashError::Store(
+            format!("Failed to add is_expired column: {e}").into(),
+          )
+        })?;
+      }
+
+      // Create index for is_expired (for filtering)
+      tx.execute(
+        "CREATE INDEX IF NOT EXISTS idx_is_expired ON clipboard(is_expired) \
+         WHERE is_expired = 1",
+        [],
+      )
+      .map_err(|e| {
+        StashError::Store(
+          format!("Failed to create is_expired index: {e}").into(),
+        )
+      })?;
+
+      tx.execute("PRAGMA user_version = 5", []).map_err(|e| {
+        StashError::Store(format!("Failed to set schema version: {e}").into())
+      })?;
+    }
+
     tx.commit().map_err(|e| {
       StashError::Store(
         format!("Failed to commit migration transaction: {e}").into(),
@@ -271,13 +354,17 @@ impl SqliteClipboardDb {
 }
 
 impl SqliteClipboardDb {
-  pub fn list_json(&self) -> Result<String, StashError> {
+  pub fn list_json(&self, include_expired: bool) -> Result<String, StashError> {
+    let query = if include_expired {
+      "SELECT id, contents, mime FROM clipboard ORDER BY \
+       COALESCE(last_accessed, 0) DESC, id DESC"
+    } else {
+      "SELECT id, contents, mime FROM clipboard WHERE (is_expired IS NULL OR \
+       is_expired = 0) ORDER BY COALESCE(last_accessed, 0) DESC, id DESC"
+    };
     let mut stmt = self
       .conn
-      .prepare(
-        "SELECT id, contents, mime FROM clipboard ORDER BY \
-         COALESCE(last_accessed, 0) DESC, id DESC",
-      )
+      .prepare(query)
       .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
     let mut rows = stmt
       .query([])
@@ -486,13 +573,18 @@ impl ClipboardDb for SqliteClipboardDb {
     &self,
     mut out: impl Write,
     preview_width: u32,
+    include_expired: bool,
   ) -> Result<usize, StashError> {
+    let query = if include_expired {
+      "SELECT id, contents, mime FROM clipboard ORDER BY \
+       COALESCE(last_accessed, 0) DESC, id DESC"
+    } else {
+      "SELECT id, contents, mime FROM clipboard WHERE (is_expired IS NULL OR \
+       is_expired = 0) ORDER BY COALESCE(last_accessed, 0) DESC, id DESC"
+    };
     let mut stmt = self
       .conn
-      .prepare(
-        "SELECT id, contents, mime FROM clipboard ORDER BY \
-         COALESCE(last_accessed, 0) DESC, id DESC",
-      )
+      .prepare(query)
       .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
     let mut rows = stmt
       .query([])
@@ -640,16 +732,118 @@ impl ClipboardDb for SqliteClipboardDb {
 
     Ok((id, contents, mime))
   }
+}
 
-  fn next_sequence(&self) -> i64 {
-    match self
+impl SqliteClipboardDb {
+  /// Get current Unix timestamp with sub-second precision
+  pub fn now() -> f64 {
+    std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .unwrap()
+      .as_secs_f64()
+  }
+
+  /// Clean up all expired entries. Returns count deleted.
+  pub fn cleanup_expired(&self) -> Result<usize, StashError> {
+    let now = Self::now();
+    self
       .conn
-      .query_row("SELECT MAX(id) FROM clipboard", [], |row| {
-        row.get::<_, Option<i64>>(0)
-      }) {
-      Ok(Some(max_id)) => max_id + 1,
-      Ok(None) | Err(_) => 1,
+      .execute(
+        "DELETE FROM clipboard WHERE expires_at IS NOT NULL AND expires_at <= \
+         ?1",
+        [now],
+      )
+      .map_err(|e| StashError::Trim(e.to_string().into()))
+  }
+
+  /// Get the earliest expiration (timestamp, id) for heap initialization
+  pub fn get_next_expiration(&self) -> Result<Option<(f64, i64)>, StashError> {
+    match self.conn.query_row(
+      "SELECT expires_at, id FROM clipboard WHERE expires_at IS NOT NULL \
+       ORDER BY expires_at ASC LIMIT 1",
+      [],
+      |row| Ok((row.get(0)?, row.get(1)?)),
+    ) {
+      Ok(result) => Ok(Some(result)),
+      Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+      Err(e) => Err(StashError::Store(e.to_string().into())),
     }
+  }
+
+  /// Set expiration timestamp for an entry
+  pub fn set_expiration(
+    &self,
+    id: i64,
+    expires_at: f64,
+  ) -> Result<(), StashError> {
+    self
+      .conn
+      .execute(
+        "UPDATE clipboard SET expires_at = ?2 WHERE id = ?1",
+        params![id, expires_at],
+      )
+      .map_err(|e| StashError::Store(e.to_string().into()))?;
+    Ok(())
+  }
+
+  /// Optimize database using VACUUM
+  pub fn vacuum(&self) -> Result<(), StashError> {
+    self
+      .conn
+      .execute("VACUUM", [])
+      .map_err(|e| StashError::Store(e.to_string().into()))?;
+    Ok(())
+  }
+
+  /// Get database statistics
+  pub fn stats(&self) -> Result<String, StashError> {
+    let total: i64 = self
+      .conn
+      .query_row("SELECT COUNT(*) FROM clipboard", [], |row| row.get(0))
+      .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+
+    let expired: i64 = self
+      .conn
+      .query_row(
+        "SELECT COUNT(*) FROM clipboard WHERE is_expired = 1",
+        [],
+        |row| row.get(0),
+      )
+      .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+
+    let active = total - expired;
+
+    let with_expiration: i64 = self
+      .conn
+      .query_row(
+        "SELECT COUNT(*) FROM clipboard WHERE expires_at IS NOT NULL AND \
+         (is_expired IS NULL OR is_expired = 0)",
+        [],
+        |row| row.get(0),
+      )
+      .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+
+    // Get database file size
+    let page_count: i64 = self
+      .conn
+      .query_row("PRAGMA page_count", [], |row| row.get(0))
+      .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+
+    let page_size: i64 = self
+      .conn
+      .query_row("PRAGMA page_size", [], |row| row.get(0))
+      .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+
+    let size_bytes = page_count * page_size;
+    let size_mb = size_bytes as f64 / 1024.0 / 1024.0;
+
+    Ok(format!(
+      "Database Statistics:\n\nEntries:\nTotal:      {total}\nActive:     \
+       {active}\nExpired:    {expired}\nWith TTL:   \
+       {with_expiration}\n\nStorage:\nSize:       {size_mb:.2} MB \
+       ({size_bytes} bytes)\nPages:      {page_count}\nPage size:  \
+       {page_size} bytes"
+    ))
   }
 }
 

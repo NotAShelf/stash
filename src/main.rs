@@ -2,9 +2,11 @@ use std::{
   env,
   io::{self, IsTerminal},
   path::PathBuf,
+  time::Duration,
 };
 
 use clap::{CommandFactory, Parser, Subcommand};
+use humantime::parse_duration;
 use inquire::Confirm;
 
 mod commands;
@@ -71,6 +73,10 @@ enum Command {
     /// Output format: "tsv" (default) or "json"
     #[arg(long, value_parser = ["tsv", "json"])]
     format: Option<String>,
+
+    /// Show only expired entries (diagnostic, does not remove them)
+    #[arg(long)]
+    expired: bool,
   },
 
   /// Decode and output clipboard entry by id
@@ -93,10 +99,19 @@ enum Command {
   },
 
   /// Wipe all clipboard history
+  ///
+  /// DEPRECATED: Use `stash db wipe` instead
+  #[command(hide = true)]
   Wipe {
     /// Ask for confirmation before wiping
     #[arg(long)]
     ask: bool,
+  },
+
+  /// Database management operations
+  Db {
+    #[command(subcommand)]
+    action: DbAction,
   },
 
   /// Import clipboard data from stdin (default: TSV format)
@@ -111,7 +126,31 @@ enum Command {
   },
 
   /// Start a process to watch clipboard for changes and store automatically.
-  Watch,
+  Watch {
+    /// Expire new entries after duration (e.g., "3s", "500ms", "1h30m").
+    #[arg(long, value_parser = parse_duration)]
+    expire_after: Option<Duration>,
+  },
+}
+
+#[derive(Subcommand)]
+enum DbAction {
+  /// Wipe database entries
+  Wipe {
+    /// Only wipe expired entries instead of all entries
+    #[arg(long)]
+    expired: bool,
+
+    /// Ask for confirmation before wiping
+    #[arg(long)]
+    ask: bool,
+  },
+
+  /// Optimize database using VACUUM
+  Vacuum,
+
+  /// Show database statistics
+  Stats,
 }
 
 fn report_error<T>(
@@ -186,16 +225,16 @@ fn main() -> color_eyre::eyre::Result<()> {
           "failed to store entry",
         );
       },
-      Some(Command::List { format }) => {
+      Some(Command::List { format, expired }) => {
         match format.as_deref() {
           Some("tsv") => {
             report_error(
-              db.list(io::stdout(), cli.preview_width),
+              db.list(io::stdout(), cli.preview_width, expired),
               "failed to list entries",
             );
           },
           Some("json") => {
-            match db.list_json() {
+            match db.list_json(expired) {
               Ok(json) => {
                 println!("{json}");
               },
@@ -210,12 +249,12 @@ fn main() -> color_eyre::eyre::Result<()> {
           None => {
             if std::io::stdout().is_terminal() {
               report_error(
-                db.list_tui(cli.preview_width),
+                db.list_tui(cli.preview_width, expired),
                 "failed to list entries in TUI",
               );
             } else {
               report_error(
-                db.list(io::stdout(), cli.preview_width),
+                db.list(io::stdout(), cli.preview_width, expired),
                 "failed to list entries",
               );
             }
@@ -287,6 +326,10 @@ fn main() -> color_eyre::eyre::Result<()> {
         }
       },
       Some(Command::Wipe { ask }) => {
+        eprintln!(
+          "Warning: The 'stash wipe' command is deprecated. Use 'stash db \
+           wipe' instead."
+        );
         let mut should_proceed = true;
         if ask {
           should_proceed = Confirm::new(
@@ -301,6 +344,62 @@ fn main() -> color_eyre::eyre::Result<()> {
         }
         if should_proceed {
           report_error(db.wipe(), "failed to wipe database");
+        }
+      },
+
+      Some(Command::Db { action }) => {
+        match action {
+          DbAction::Wipe { expired, ask } => {
+            let mut should_proceed = true;
+            if ask {
+              let message = if expired {
+                "Are you sure you want to wipe all expired clipboard entries?"
+              } else {
+                "Are you sure you want to wipe ALL clipboard history?"
+              };
+              should_proceed = Confirm::new(message)
+                .with_default(false)
+                .prompt()
+                .unwrap_or(false);
+              if !should_proceed {
+                log::info!("db wipe command aborted by user.");
+              }
+            }
+            if should_proceed {
+              if expired {
+                match db.cleanup_expired() {
+                  Ok(count) => {
+                    log::info!("Wiped {} expired entries", count);
+                  },
+                  Err(e) => {
+                    log::error!("failed to wipe expired entries: {e}");
+                  },
+                }
+              } else {
+                report_error(db.wipe(), "failed to wipe database");
+              }
+            }
+          },
+          DbAction::Vacuum => {
+            match db.vacuum() {
+              Ok(()) => {
+                log::info!("Database optimized successfully");
+              },
+              Err(e) => {
+                log::error!("failed to vacuum database: {e}");
+              },
+            }
+          },
+          DbAction::Stats => {
+            match db.stats() {
+              Ok(stats) => {
+                println!("{}", stats);
+              },
+              Err(e) => {
+                log::error!("failed to get database stats: {e}");
+              },
+            }
+          },
         }
       },
 
@@ -334,7 +433,7 @@ fn main() -> color_eyre::eyre::Result<()> {
           }
         }
       },
-      Some(Command::Watch) => {
+      Some(Command::Watch { expire_after }) => {
         db.watch(
           cli.max_dedupe_search,
           cli.max_items,
@@ -342,6 +441,7 @@ fn main() -> color_eyre::eyre::Result<()> {
           &cli.excluded_apps,
           #[cfg(not(feature = "use-toplevel"))]
           &[],
+          expire_after,
         );
       },
 
