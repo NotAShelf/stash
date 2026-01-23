@@ -10,7 +10,6 @@ use std::{
 };
 
 use base64::prelude::*;
-use imagesize::ImageType;
 use log::{debug, error, warn};
 use regex::Regex;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -429,7 +428,7 @@ impl ClipboardDb for SqliteClipboardDb {
     #[allow(clippy::cast_possible_wrap)]
     let content_hash = hasher.finish() as i64;
 
-    let mime = detect_mime_optimized(&buf);
+    let mime = crate::mime::detect_mime(&buf);
 
     // Try to load regex from systemd credential file, then env var
     let regex = load_sensitive_regex();
@@ -884,51 +883,6 @@ pub fn extract_id(input: &str) -> Result<i64, &'static str> {
   id_str.parse().map_err(|_| "invalid id")
 }
 
-pub fn detect_mime_optimized(data: &[u8]) -> Option<String> {
-  // Check if it's valid UTF-8 first, which most clipboard content are.
-  // This will be used to return early without unnecessary mimetype detection
-  // overhead.
-  if std::str::from_utf8(data).is_ok() {
-    return Some("text/plain".to_string());
-  }
-
-  // Only run image detection on binary data
-  detect_mime(data)
-}
-
-pub fn detect_mime(data: &[u8]) -> Option<String> {
-  if let Ok(img_type) = imagesize::image_type(data) {
-    let mime_str = match img_type {
-      ImageType::Png => "image/png",
-      ImageType::Jpeg => "image/jpeg",
-      ImageType::Gif => "image/gif",
-      ImageType::Bmp => "image/bmp",
-      ImageType::Tiff => "image/tiff",
-      ImageType::Webp => "image/webp",
-      ImageType::Aseprite => "image/x-aseprite",
-      ImageType::Dds => "image/vnd.ms-dds",
-      ImageType::Exr => "image/aces",
-      ImageType::Farbfeld => "image/farbfeld",
-      ImageType::Hdr => "image/vnd.radiance",
-      ImageType::Ico => "image/x-icon",
-      ImageType::Ilbm => "image/ilbm",
-      ImageType::Jxl => "image/jxl",
-      ImageType::Ktx2 => "image/ktx2",
-      ImageType::Pnm => "image/x-portable-anymap",
-      ImageType::Psd => "image/vnd.adobe.photoshop",
-      ImageType::Qoi => "image/qoi",
-      ImageType::Tga => "image/x-tga",
-      ImageType::Vtf => "image/x-vtf",
-      ImageType::Heif(imagesize::Compression::Hevc) => "image/heic",
-      ImageType::Heif(_) => "image/heif",
-      _ => "application/octet-stream",
-    };
-    Some(mime_str.to_string())
-  } else {
-    None
-  }
-}
-
 pub fn preview_entry(data: &[u8], mime: Option<&str>, width: u32) -> String {
   if let Some(mime) = mime {
     if mime.starts_with("image/") {
@@ -1239,7 +1193,7 @@ mod tests {
 
     assert_eq!(
       get_schema_version(&db.conn).expect("Failed to get schema version"),
-      3
+      5
     );
 
     assert!(table_column_exists(&db.conn, "clipboard", "content_hash"));
@@ -1290,7 +1244,7 @@ mod tests {
     assert_eq!(
       get_schema_version(&db.conn)
         .expect("Failed to get version after migration"),
-      3
+      5
     );
 
     assert!(table_column_exists(&db.conn, "clipboard", "content_hash"));
@@ -1332,7 +1286,7 @@ mod tests {
     assert_eq!(
       get_schema_version(&db.conn)
         .expect("Failed to get version after migration"),
-      3
+      5
     );
 
     assert!(table_column_exists(&db.conn, "clipboard", "content_hash"));
@@ -1375,7 +1329,7 @@ mod tests {
     assert_eq!(
       get_schema_version(&db.conn)
         .expect("Failed to get version after migration"),
-      3
+      5
     );
 
     assert!(table_column_exists(&db.conn, "clipboard", "last_accessed"));
@@ -1411,7 +1365,7 @@ mod tests {
       get_schema_version(&db2.conn).expect("Failed to get version");
 
     assert_eq!(version_after_first, version_after_second);
-    assert_eq!(version_after_first, 3);
+    assert_eq!(version_after_first, 5);
   }
 
   #[test]
@@ -1540,7 +1494,7 @@ mod tests {
 
     assert_eq!(
       get_schema_version(&db.conn).expect("Failed to get version"),
-      3
+      5
     );
 
     let count: i64 = db

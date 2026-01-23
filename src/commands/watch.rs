@@ -100,6 +100,7 @@ pub trait WatchCommand {
     max_items: u64,
     excluded_apps: &[String],
     expire_after: Option<Duration>,
+    mime_type_preference: &str,
   );
 }
 
@@ -110,9 +111,13 @@ impl WatchCommand for SqliteClipboardDb {
     max_items: u64,
     excluded_apps: &[String],
     expire_after: Option<Duration>,
+    mime_type_preference: &str,
   ) {
     smol::block_on(async {
-      log::info!("Starting clipboard watch daemon");
+      log::info!(
+        "Starting clipboard watch daemon with MIME type preference: \
+         {mime_type_preference}"
+      );
 
       // Build expiration queue from existing entries
       let mut exp_queue = ExpirationQueue::new();
@@ -160,12 +165,19 @@ impl WatchCommand for SqliteClipboardDb {
         hasher.finish()
       };
 
+      // Convert MIME type preference string to wl_clipboard_rs enum
+      let mime_type = match mime_type_preference {
+        "text" => wl_clipboard_rs::paste::MimeType::Text,
+        "image" => {
+          wl_clipboard_rs::paste::MimeType::TextWithPriority("image/png")
+        },
+        _ => wl_clipboard_rs::paste::MimeType::Any,
+      };
+
       // Initialize with current clipboard
-      if let Ok((mut reader, _)) = get_contents(
-        ClipboardType::Regular,
-        Seat::Unspecified,
-        wl_clipboard_rs::paste::MimeType::Any,
-      ) {
+      if let Ok((mut reader, _)) =
+        get_contents(ClipboardType::Regular, Seat::Unspecified, mime_type)
+      {
         buf.clear();
         if reader.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
           last_hash = Some(hash_contents(&buf));
@@ -205,7 +217,7 @@ impl WatchCommand for SqliteClipboardDb {
                 if let Ok((mut reader, _)) = get_contents(
                   ClipboardType::Regular,
                   Seat::Unspecified,
-                  wl_clipboard_rs::paste::MimeType::Any,
+                  mime_type,
                 ) {
                   let mut current_buf = Vec::new();
                   if reader.read_to_end(&mut current_buf).is_ok()
@@ -250,11 +262,8 @@ impl WatchCommand for SqliteClipboardDb {
         }
 
         // Normal clipboard polling
-        match get_contents(
-          ClipboardType::Regular,
-          Seat::Unspecified,
-          wl_clipboard_rs::paste::MimeType::Any,
-        ) {
+        match get_contents(ClipboardType::Regular, Seat::Unspecified, mime_type)
+        {
           Ok((mut reader, _mime_type)) => {
             buf.clear();
             if let Err(e) = reader.read_to_end(&mut buf) {
