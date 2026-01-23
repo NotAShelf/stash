@@ -275,6 +275,30 @@ entry has expired from history.
 > This behavior only applies when the watch daemon is actively running. Manual
 > expiration or deletion of entries will not clear the clipboard.
 
+### MIME Type Preference for Watch
+
+`stash watch` supports a `--mime-type` (short `-t`) option that lets you
+prioritise which MIME type the daemon should request from the clipboard when
+multiple representations are available.
+
+- `any` (default): Request any available representation (current behaviour).
+- `text`: Prefer text representations (e.g. `text/plain`, `text/html`).
+- `image`: Prefer image representations (e.g. `image/png`, `image/jpeg`) so that
+  image copies from browsers or file managers are stored as images rather than
+  HTML fragments.
+
+Example: prefer images when running the watch daemon
+
+```bash
+stash watch --mime-type image
+```
+
+This is useful when copying images from browsers or file managers where the
+clipboard may offer both HTML and image representations; selecting `image` will
+ask the compositor for image data first. Most users will be fine using the
+default value (`any`) but in the case your browser (or other applications!)
+regularly misrepresent data, you might wish to prioritize a different type.
+
 ### Options
 
 Some commands take additional flags to modify Stash's behavior. See each
