@@ -1161,6 +1161,13 @@ mod tests {
 
   use super::*;
 
+  /// Create an in-memory test database with full schema.
+  fn test_db() -> SqliteClipboardDb {
+    let conn =
+      Connection::open_in_memory().expect("Failed to open in-memory db");
+    SqliteClipboardDb::new(conn).expect("Failed to create test database")
+  }
+
   fn get_schema_version(conn: &Connection) -> rusqlite::Result<i64> {
     conn.pragma_query_value(None, "user_version", |row| row.get(0))
   }
@@ -1502,5 +1509,261 @@ mod tests {
       .query_row("SELECT COUNT(*) FROM clipboard", [], |row| row.get(0))
       .expect("Failed to count");
     assert_eq!(count, 1, "Existing data should be preserved");
+  }
+
+  #[test]
+  fn test_store_uri_list_content() {
+    let db = test_db();
+    let data = b"file:///home/user/document.pdf\nfile:///home/user/image.png";
+    let id = db
+      .store_entry(std::io::Cursor::new(data.to_vec()), 100, 1000, None)
+      .expect("Failed to store URI list");
+
+    let mime: Option<String> = db
+      .conn
+      .query_row("SELECT mime FROM clipboard WHERE id = ?1", [id], |row| {
+        row.get(0)
+      })
+      .expect("Failed to get mime");
+    assert_eq!(mime, Some("text/uri-list".to_string()));
+  }
+
+  #[test]
+  fn test_store_binary_image() {
+    let db = test_db();
+    // Minimal PNG header
+    let data: Vec<u8> = vec![
+      0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
+      0x00, 0x00, 0x00, 0x0D, // IHDR chunk length
+      0x49, 0x48, 0x44, 0x52, // "IHDR"
+      0x00, 0x00, 0x00, 0x01, // width: 1
+      0x00, 0x00, 0x00, 0x01, // height: 1
+      0x08, 0x02, 0x00, 0x00, 0x00, // bit depth, color, etc.
+      0x90, 0x77, 0x53, 0xDE, // CRC
+    ];
+    let id = db
+      .store_entry(std::io::Cursor::new(data.clone()), 100, 1000, None)
+      .expect("Failed to store image");
+
+    let (contents, mime): (Vec<u8>, Option<String>) = db
+      .conn
+      .query_row(
+        "SELECT contents, mime FROM clipboard WHERE id = ?1",
+        [id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+      )
+      .expect("Failed to get stored entry");
+    assert_eq!(contents, data);
+    assert_eq!(mime, Some("image/png".to_string()));
+  }
+
+  #[test]
+  fn test_deduplication() {
+    let db = test_db();
+    let data = b"duplicate content";
+
+    let id1 = db
+      .store_entry(std::io::Cursor::new(data.to_vec()), 100, 1000, None)
+      .expect("Failed to store first");
+    let _id2 = db
+      .store_entry(std::io::Cursor::new(data.to_vec()), 100, 1000, None)
+      .expect("Failed to store second");
+
+    // First entry should have been removed by deduplication
+    let count: i64 = db
+      .conn
+      .query_row("SELECT COUNT(*) FROM clipboard", [], |row| row.get(0))
+      .expect("Failed to count");
+    assert_eq!(count, 1, "Deduplication should keep only one copy");
+
+    // The original id should be gone
+    let exists: bool = db
+      .conn
+      .query_row(
+        "SELECT COUNT(*) FROM clipboard WHERE id = ?1",
+        [id1],
+        |row| row.get::<_, i64>(0),
+      )
+      .map(|c| c > 0)
+      .unwrap_or(false);
+    assert!(!exists, "Old entry should be removed");
+  }
+
+  #[test]
+  fn test_trim_excess_entries() {
+    let db = test_db();
+    for i in 0..5 {
+      let data = format!("entry {i}");
+      db.store_entry(
+        std::io::Cursor::new(data.into_bytes()),
+        100,
+        3, // max 3 items
+        None,
+      )
+      .expect("Failed to store");
+    }
+
+    let count: i64 = db
+      .conn
+      .query_row("SELECT COUNT(*) FROM clipboard", [], |row| row.get(0))
+      .expect("Failed to count");
+    assert!(count <= 3, "Trim should keep at most max_items entries");
+  }
+
+  #[test]
+  fn test_reject_empty_input() {
+    let db = test_db();
+    let result =
+      db.store_entry(std::io::Cursor::new(Vec::new()), 100, 1000, None);
+    assert!(matches!(result, Err(StashError::EmptyOrTooLarge)));
+  }
+
+  #[test]
+  fn test_reject_whitespace_input() {
+    let db = test_db();
+    let result = db.store_entry(
+      std::io::Cursor::new(b"   \n\t  ".to_vec()),
+      100,
+      1000,
+      None,
+    );
+    assert!(matches!(result, Err(StashError::AllWhitespace)));
+  }
+
+  #[test]
+  fn test_reject_oversized_input() {
+    let db = test_db();
+    // 5MB + 1 byte
+    let data = vec![b'a'; 5 * 1_000_000 + 1];
+    let result = db.store_entry(std::io::Cursor::new(data), 100, 1000, None);
+    assert!(matches!(result, Err(StashError::EmptyOrTooLarge)));
+  }
+
+  #[test]
+  fn test_delete_entries_by_id() {
+    let db = test_db();
+    let id = db
+      .store_entry(std::io::Cursor::new(b"to delete".to_vec()), 100, 1000, None)
+      .expect("Failed to store");
+
+    let input = format!("{id}\tpreview text\n");
+    let deleted = db
+      .delete_entries(std::io::Cursor::new(input.into_bytes()))
+      .expect("Failed to delete");
+    assert_eq!(deleted, 1);
+
+    let count: i64 = db
+      .conn
+      .query_row("SELECT COUNT(*) FROM clipboard", [], |row| row.get(0))
+      .expect("Failed to count");
+    assert_eq!(count, 0);
+  }
+
+  #[test]
+  fn test_delete_query_matching() {
+    let db = test_db();
+    db.store_entry(
+      std::io::Cursor::new(b"secret password 123".to_vec()),
+      100,
+      1000,
+      None,
+    )
+    .expect("Failed to store");
+    db.store_entry(
+      std::io::Cursor::new(b"normal text".to_vec()),
+      100,
+      1000,
+      None,
+    )
+    .expect("Failed to store");
+
+    let deleted = db
+      .delete_query("secret password")
+      .expect("Failed to delete query");
+    assert_eq!(deleted, 1);
+
+    let count: i64 = db
+      .conn
+      .query_row("SELECT COUNT(*) FROM clipboard", [], |row| row.get(0))
+      .expect("Failed to count");
+    assert_eq!(count, 1);
+  }
+
+  #[test]
+  fn test_wipe_db() {
+    let db = test_db();
+    for i in 0..3 {
+      let data = format!("entry {i}");
+      db.store_entry(std::io::Cursor::new(data.into_bytes()), 100, 1000, None)
+        .expect("Failed to store");
+    }
+
+    db.wipe_db().expect("Failed to wipe");
+
+    let count: i64 = db
+      .conn
+      .query_row("SELECT COUNT(*) FROM clipboard", [], |row| row.get(0))
+      .expect("Failed to count");
+    assert_eq!(count, 0);
+  }
+
+  #[test]
+  fn test_extract_id_valid() {
+    assert_eq!(extract_id("42\tsome preview"), Ok(42));
+    assert_eq!(extract_id("1"), Ok(1));
+    assert_eq!(extract_id("999\t"), Ok(999));
+  }
+
+  #[test]
+  fn test_extract_id_invalid() {
+    assert!(extract_id("abc\tpreview").is_err());
+    assert!(extract_id("").is_err());
+    assert!(extract_id("\tpreview").is_err());
+  }
+
+  #[test]
+  fn test_preview_entry_text() {
+    let data = b"Hello, world!";
+    let preview = preview_entry(data, Some("text/plain"), 100);
+    assert_eq!(preview, "Hello, world!");
+  }
+
+  #[test]
+  fn test_preview_entry_image() {
+    let data = vec![0x89, 0x50, 0x4E, 0x47]; // PNG-ish bytes
+    let preview = preview_entry(&data, Some("image/png"), 100);
+    assert!(preview.contains("binary data"));
+    assert!(preview.contains("image/png"));
+  }
+
+  #[test]
+  fn test_preview_entry_truncation() {
+    let data = b"This is a rather long piece of text that should be truncated";
+    let preview = preview_entry(data, Some("text/plain"), 10);
+    assert!(preview.len() <= 15); // 10 chars + ellipsis (multi-byte)
+    assert!(preview.ends_with('…'));
+  }
+
+  #[test]
+  fn test_size_str_formatting() {
+    assert_eq!(size_str(0), "0 B");
+    assert_eq!(size_str(512), "512 B");
+    assert_eq!(size_str(1024), "1 KiB");
+    assert_eq!(size_str(1024 * 1024), "1 MiB");
+  }
+
+  #[test]
+  fn test_copy_entry_returns_data() {
+    let db = test_db();
+    let data = b"copy me";
+    let id = db
+      .store_entry(std::io::Cursor::new(data.to_vec()), 100, 1000, None)
+      .expect("Failed to store");
+
+    let (returned_id, contents, mime) =
+      db.copy_entry(id).expect("Failed to copy");
+    assert_eq!(returned_id, id);
+    assert_eq!(contents, data.to_vec());
+    assert_eq!(mime, Some("text/plain".to_string()));
   }
 }
