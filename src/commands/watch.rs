@@ -8,7 +8,13 @@ use std::{
 use smol::Timer;
 use wl_clipboard_rs::{
   copy::{MimeType as CopyMimeType, Options, Source},
-  paste::{ClipboardType, Seat, get_contents},
+  paste::{
+    ClipboardType,
+    MimeType as PasteMimeType,
+    Seat,
+    get_contents,
+    get_mime_types_ordered,
+  },
 };
 
 use crate::db::{ClipboardDb, SqliteClipboardDb};
@@ -93,6 +99,63 @@ impl ExpirationQueue {
   }
 }
 
+/// Get clipboard contents using the source application's preferred MIME type.
+///
+/// See, `MimeType::Any` lets wl-clipboard-rs pick a type in arbitrary order,
+/// which causes issues when applications offer multiple types (e.g. file
+/// managers offering `text/uri-list` + `text/plain`, or Firefox offering
+/// `text/html` + `image/png` + `text/plain`).
+///
+/// This queries the ordered types via [`get_mime_types_ordered`], which
+/// preserves the Wayland protocol's offer order (source application's
+/// preference) and then requests the first type with [`MimeType::Specific`].
+///
+/// The two-step approach has a theoretical race (clipboard could change between
+/// the calls), but the wl-clipboard-rs API has no single-call variant that
+/// respects source ordering. A race simply produces an error that the polling
+/// loop handles like any other clipboard-empty/error case.
+///
+/// When `preference` is `"text"`, uses `MimeType::Text` directly (single call).
+/// When `preference` is `"image"`, picks the first offered `image/*` type.
+/// Otherwise picks the source's first offered type.
+fn negotiate_mime_type(
+  preference: &str,
+) -> Result<(Box<dyn Read>, String), wl_clipboard_rs::paste::Error> {
+  if preference == "text" {
+    let (reader, mime_str) = get_contents(
+      ClipboardType::Regular,
+      Seat::Unspecified,
+      PasteMimeType::Text,
+    )?;
+    return Ok((Box::new(reader) as Box<dyn Read>, mime_str));
+  }
+
+  let offered =
+    get_mime_types_ordered(ClipboardType::Regular, Seat::Unspecified)?;
+
+  let chosen = if preference == "image" {
+    // Pick the first offered image type, fall back to first overall
+    offered
+      .iter()
+      .find(|m| m.starts_with("image/"))
+      .or_else(|| offered.first())
+  } else {
+    offered.first()
+  };
+
+  match chosen {
+    Some(mime_str) => {
+      let (reader, actual_mime) = get_contents(
+        ClipboardType::Regular,
+        Seat::Unspecified,
+        PasteMimeType::Specific(mime_str),
+      )?;
+      Ok((Box::new(reader) as Box<dyn Read>, actual_mime))
+    },
+    None => Err(wl_clipboard_rs::paste::Error::NoSeats),
+  }
+}
+
 pub trait WatchCommand {
   fn watch(
     &self,
@@ -165,19 +228,8 @@ impl WatchCommand for SqliteClipboardDb {
         hasher.finish()
       };
 
-      // Convert MIME type preference string to wl_clipboard_rs enum
-      let mime_type = match mime_type_preference {
-        "text" => wl_clipboard_rs::paste::MimeType::Text,
-        "image" => {
-          wl_clipboard_rs::paste::MimeType::TextWithPriority("image/png")
-        },
-        _ => wl_clipboard_rs::paste::MimeType::Any,
-      };
-
-      // Initialize with current clipboard
-      if let Ok((mut reader, _)) =
-        get_contents(ClipboardType::Regular, Seat::Unspecified, mime_type)
-      {
+      // Initialize with current clipboard using smart MIME negotiation
+      if let Ok((mut reader, _)) = negotiate_mime_type(mime_type_preference) {
         buf.clear();
         if reader.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
           last_hash = Some(hash_contents(&buf));
@@ -214,11 +266,9 @@ impl WatchCommand for SqliteClipboardDb {
                 log::info!("Entry {id} marked as expired");
 
                 // Check if this expired entry is currently in the clipboard
-                if let Ok((mut reader, _)) = get_contents(
-                  ClipboardType::Regular,
-                  Seat::Unspecified,
-                  mime_type,
-                ) {
+                if let Ok((mut reader, _)) =
+                  negotiate_mime_type(mime_type_preference)
+                {
                   let mut current_buf = Vec::new();
                   if reader.read_to_end(&mut current_buf).is_ok()
                     && !current_buf.is_empty()
@@ -262,8 +312,7 @@ impl WatchCommand for SqliteClipboardDb {
         }
 
         // Normal clipboard polling
-        match get_contents(ClipboardType::Regular, Seat::Unspecified, mime_type)
-        {
+        match negotiate_mime_type(mime_type_preference) {
           Ok((mut reader, _mime_type)) => {
             buf.clear();
             if let Err(e) = reader.read_to_end(&mut buf) {
@@ -326,5 +375,76 @@ impl WatchCommand for SqliteClipboardDb {
         }
       }
     });
+  }
+}
+
+/// Unit-testable helper: given ordered offers and a preference, return the
+/// chosen MIME type. This mirrors the selection logic in
+/// [`negotiate_mime_type`] without requiring a Wayland connection.
+#[cfg(test)]
+fn pick_mime<'a>(
+  offered: &'a [String],
+  preference: &str,
+) -> Option<&'a String> {
+  if preference == "image" {
+    offered
+      .iter()
+      .find(|m| m.starts_with("image/"))
+      .or_else(|| offered.first())
+  } else {
+    offered.first()
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn test_pick_first_offered() {
+    let offered = vec!["text/uri-list".to_string(), "text/plain".to_string()];
+    assert_eq!(pick_mime(&offered, "any").unwrap(), "text/uri-list");
+  }
+
+  #[test]
+  fn test_pick_image_preference_finds_image() {
+    let offered = vec![
+      "text/html".to_string(),
+      "image/png".to_string(),
+      "text/plain".to_string(),
+    ];
+    assert_eq!(pick_mime(&offered, "image").unwrap(), "image/png");
+  }
+
+  #[test]
+  fn test_pick_image_preference_falls_back() {
+    let offered = vec!["text/html".to_string(), "text/plain".to_string()];
+    // No image types offered — falls back to first
+    assert_eq!(pick_mime(&offered, "image").unwrap(), "text/html");
+  }
+
+  #[test]
+  fn test_pick_empty_offered() {
+    let offered: Vec<String> = vec![];
+    assert!(pick_mime(&offered, "any").is_none());
+  }
+
+  #[test]
+  fn test_pick_source_order_preserved() {
+    // Firefox typically offers html first, then image, then text
+    let offered = vec![
+      "text/html".to_string(),
+      "image/png".to_string(),
+      "text/plain".to_string(),
+    ];
+    // With "any", we trust the source: first offered wins
+    assert_eq!(pick_mime(&offered, "any").unwrap(), "text/html");
+  }
+
+  #[test]
+  fn test_pick_file_manager_uri_list_first() {
+    // File managers typically offer uri-list first
+    let offered = vec!["text/uri-list".to_string(), "text/plain".to_string()];
+    assert_eq!(pick_mime(&offered, "any").unwrap(), "text/uri-list");
   }
 }
