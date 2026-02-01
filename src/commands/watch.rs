@@ -140,7 +140,26 @@ fn negotiate_mime_type(
       .find(|m| m.starts_with("image/"))
       .or_else(|| offered.first())
   } else {
-    offered.first()
+    // XXX: When preference is "any", deprioritize text/html if a more
+    // concrete type is available. Browsers and Electron apps put
+    // text/html first even for "Copy Image", but the HTML is just
+    // a wrapper (<img src="...">), i.e., never what the user wants in a
+    // clipboard manager. Prefer image/* first, then any non-html
+    // type, and fall back to text/html only as a last resort.
+    let has_image = offered.iter().any(|m| m.starts_with("image/"));
+    if has_image {
+      offered
+        .iter()
+        .find(|m| m.starts_with("image/"))
+        .or_else(|| offered.first())
+    } else if offered.first().is_some_and(|m| m == "text/html") {
+      offered
+        .iter()
+        .find(|m| *m != "text/html")
+        .or_else(|| offered.first())
+    } else {
+      offered.first()
+    }
   };
 
   match chosen {
@@ -392,7 +411,20 @@ fn pick_mime<'a>(
       .find(|m| m.starts_with("image/"))
       .or_else(|| offered.first())
   } else {
-    offered.first()
+    let has_image = offered.iter().any(|m| m.starts_with("image/"));
+    if has_image {
+      offered
+        .iter()
+        .find(|m| m.starts_with("image/"))
+        .or_else(|| offered.first())
+    } else if offered.first().is_some_and(|m| m == "text/html") {
+      offered
+        .iter()
+        .find(|m| *m != "text/html")
+        .or_else(|| offered.first())
+    } else {
+      offered.first()
+    }
   }
 }
 
@@ -430,15 +462,36 @@ mod tests {
   }
 
   #[test]
-  fn test_pick_source_order_preserved() {
-    // Firefox typically offers html first, then image, then text
+  fn test_pick_image_over_html_firefox_copy_image() {
+    // Firefox "Copy Image" offers html first, then image, then text.
+    // We should pick the image, not the html wrapper.
     let offered = vec![
       "text/html".to_string(),
       "image/png".to_string(),
       "text/plain".to_string(),
     ];
-    // With "any", we trust the source: first offered wins
+    assert_eq!(pick_mime(&offered, "any").unwrap(), "image/png");
+  }
+
+  #[test]
+  fn test_pick_image_over_html_electron() {
+    // Electron apps also put text/html before image types
+    let offered = vec!["text/html".to_string(), "image/jpeg".to_string()];
+    assert_eq!(pick_mime(&offered, "any").unwrap(), "image/jpeg");
+  }
+
+  #[test]
+  fn test_pick_html_fallback_when_only_html() {
+    // When text/html is the only type, pick it
+    let offered = vec!["text/html".to_string()];
     assert_eq!(pick_mime(&offered, "any").unwrap(), "text/html");
+  }
+
+  #[test]
+  fn test_pick_text_over_html_when_no_image() {
+    // Rich text copy: html + plain, no image — prefer plain text
+    let offered = vec!["text/html".to_string(), "text/plain".to_string()];
+    assert_eq!(pick_mime(&offered, "any").unwrap(), "text/plain");
   }
 
   #[test]
