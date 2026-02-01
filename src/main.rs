@@ -11,6 +11,7 @@ use inquire::Confirm;
 
 mod commands;
 pub(crate) mod db;
+pub(crate) mod mime;
 mod multicall;
 #[cfg(feature = "use-toplevel")] mod wayland;
 
@@ -130,6 +131,10 @@ enum Command {
     /// Expire new entries after duration (e.g., "3s", "500ms", "1h30m").
     #[arg(long, value_parser = parse_duration)]
     expire_after: Option<Duration>,
+
+    /// MIME type preference for clipboard reading.
+    #[arg(short = 't', long, default_value = "any")]
+    mime_type: String,
   },
 }
 
@@ -433,7 +438,10 @@ fn main() -> color_eyre::eyre::Result<()> {
           }
         }
       },
-      Some(Command::Watch { expire_after }) => {
+      Some(Command::Watch {
+        expire_after,
+        mime_type,
+      }) => {
         db.watch(
           cli.max_dedupe_search,
           cli.max_items,
@@ -442,6 +450,7 @@ fn main() -> color_eyre::eyre::Result<()> {
           #[cfg(not(feature = "use-toplevel"))]
           &[],
           expire_after,
+          &mime_type,
         );
       },
 

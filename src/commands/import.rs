@@ -1,12 +1,6 @@
 use std::io::{self, BufRead};
 
-use crate::db::{
-  ClipboardDb,
-  Entry,
-  SqliteClipboardDb,
-  StashError,
-  detect_mime,
-};
+use crate::db::{ClipboardDb, Entry, SqliteClipboardDb, StashError};
 
 pub trait ImportCommand {
   /// Import clipboard entries from TSV format.
@@ -44,7 +38,7 @@ impl ImportCommand for SqliteClipboardDb {
 
       let entry = Entry {
         contents: val.as_bytes().to_vec(),
-        mime:     detect_mime(val.as_bytes()),
+        mime:     crate::mime::detect_mime(val.as_bytes()),
       };
 
       self
