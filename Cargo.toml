@@ -21,7 +21,7 @@ color-eyre            = "0.6.5"
 crossterm             = "0.29.0"
 ctrlc                 = "3.5.1"
 dirs                  = "6.0.0"
-env_logger            = "0.11.8"
+env_logger            = "0.11.9"
 humantime             = "2.3.0"
 imagesize             = "0.14.0"
 inquire               = { version = "0.9.2", default-features = false, features = [ "crossterm" ] }
