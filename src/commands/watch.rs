@@ -175,6 +175,7 @@ fn negotiate_mime_type(
   }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub trait WatchCommand {
   fn watch(
     &self,
@@ -183,6 +184,8 @@ pub trait WatchCommand {
     excluded_apps: &[String],
     expire_after: Option<Duration>,
     mime_type_preference: &str,
+    min_size: Option<usize>,
+    max_size: usize,
   );
 }
 
@@ -194,6 +197,8 @@ impl WatchCommand for SqliteClipboardDb {
     excluded_apps: &[String],
     expire_after: Option<Duration>,
     mime_type_preference: &str,
+    min_size: Option<usize>,
+    max_size: usize,
   ) {
     smol::block_on(async {
       log::info!(
@@ -349,6 +354,8 @@ impl WatchCommand for SqliteClipboardDb {
                   max_dedupe_search,
                   max_items,
                   Some(excluded_apps),
+                  min_size,
+                  max_size,
                 ) {
                   Ok(id) => {
                     log::info!("Stored new clipboard entry (id: {id})");

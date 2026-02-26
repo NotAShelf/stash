@@ -15,15 +15,18 @@ pub(crate) mod mime;
 mod multicall;
 #[cfg(feature = "use-toplevel")] mod wayland;
 
-use crate::commands::{
-  decode::DecodeCommand,
-  delete::DeleteCommand,
-  import::ImportCommand,
-  list::ListCommand,
-  query::QueryCommand,
-  store::StoreCommand,
-  watch::WatchCommand,
-  wipe::WipeCommand,
+use crate::{
+  commands::{
+    decode::DecodeCommand,
+    delete::DeleteCommand,
+    import::ImportCommand,
+    list::ListCommand,
+    query::QueryCommand,
+    store::StoreCommand,
+    watch::WatchCommand,
+    wipe::WipeCommand,
+  },
+  db::DEFAULT_MAX_ENTRY_SIZE,
 };
 
 #[derive(Parser)]
@@ -41,6 +44,16 @@ struct Cli {
   /// clipboard data.
   #[arg(long, default_value_t = 20)]
   max_dedupe_search: u64,
+
+  /// Minimum size (in bytes) for clipboard entries. Entries smaller than this
+  /// will not be stored.
+  #[arg(long, env = "STASH_MIN_SIZE")]
+  min_size: Option<usize>,
+
+  /// Maximum size (in bytes) for clipboard entries. Entries larger than this
+  /// will not be stored. Defaults to 5MB.
+  #[arg(long, default_value_t = DEFAULT_MAX_ENTRY_SIZE, env = "STASH_MAX_SIZE")]
+  max_size: usize,
 
   /// Maximum width (in characters) for clipboard entry previews in list
   /// output.
@@ -226,6 +239,8 @@ fn main() -> color_eyre::eyre::Result<()> {
             &cli.excluded_apps,
             #[cfg(not(feature = "use-toplevel"))]
             &[],
+            cli.min_size,
+            cli.max_size,
           ),
           "failed to store entry",
         );
@@ -451,6 +466,8 @@ fn main() -> color_eyre::eyre::Result<()> {
           &[],
           expire_after,
           &mime_type,
+          cli.min_size,
+          cli.max_size,
         );
       },
 

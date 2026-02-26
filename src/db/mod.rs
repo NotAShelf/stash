@@ -16,6 +16,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub const DEFAULT_MAX_ENTRY_SIZE: usize = 5_000_000;
+
 #[derive(Error, Debug)]
 pub enum StashError {
   #[error("Input is empty or too large, skipping store.")]
@@ -70,7 +72,7 @@ pub trait ClipboardDb {
     max_items: u64,
     excluded_apps: Option<&[String]>,
     min_size: Option<usize>,
-    max_size: Option<usize>,
+    max_size: usize,
   ) -> Result<i64, StashError>;
 
   fn deduplicate_by_hash(
@@ -417,7 +419,7 @@ impl ClipboardDb for SqliteClipboardDb {
     max_items: u64,
     excluded_apps: Option<&[String]>,
     min_size: Option<usize>,
-    max_size: Option<usize>,
+    max_size: usize,
   ) -> Result<i64, StashError> {
     let mut buf = Vec::new();
     if input.read_to_end(&mut buf).is_err() || buf.is_empty() {
@@ -432,12 +434,8 @@ impl ClipboardDb for SqliteClipboardDb {
       return Err(StashError::TooSmall(min));
     }
 
-    if let Some(max) = max_size {
-      if size > max {
-        return Err(StashError::TooLarge(max));
-      }
-    } else if size > 5 * 1_000_000 {
-      return Err(StashError::TooLarge(5 * 1_000_000));
+    if size > max_size {
+      return Err(StashError::TooLarge(max_size));
     }
 
     if buf.iter().all(u8::is_ascii_whitespace) {
@@ -1536,7 +1534,7 @@ mod tests {
     let cursor = std::io::Cursor::new(test_data.to_vec());
 
     let id = db
-      .store_entry(cursor, 100, 1000, None, None, None)
+      .store_entry(cursor, 100, 1000, None, None, DEFAULT_MAX_ENTRY_SIZE)
       .expect("Failed to store entry");
 
     let content_hash: Option<i64> = db
@@ -1571,7 +1569,7 @@ mod tests {
     let test_data = b"Test content for copy";
     let cursor = std::io::Cursor::new(test_data.to_vec());
     let id_a = db
-      .store_entry(cursor, 100, 1000, None, None, None)
+      .store_entry(cursor, 100, 1000, None, None, DEFAULT_MAX_ENTRY_SIZE)
       .expect("Failed to store entry A");
 
     let original_last_accessed: i64 = db
@@ -1672,7 +1670,7 @@ mod tests {
         1000,
         None,
         None,
-        None,
+        DEFAULT_MAX_ENTRY_SIZE,
       )
       .expect("Failed to store URI list");
 
@@ -1705,7 +1703,7 @@ mod tests {
         1000,
         None,
         None,
-        None,
+        DEFAULT_MAX_ENTRY_SIZE,
       )
       .expect("Failed to store image");
 
@@ -1733,7 +1731,7 @@ mod tests {
         1000,
         None,
         None,
-        None,
+        DEFAULT_MAX_ENTRY_SIZE,
       )
       .expect("Failed to store first");
     let _id2 = db
@@ -1743,7 +1741,7 @@ mod tests {
         1000,
         None,
         None,
-        None,
+        DEFAULT_MAX_ENTRY_SIZE,
       )
       .expect("Failed to store second");
 
@@ -1778,7 +1776,7 @@ mod tests {
         3, // max 3 items
         None,
         None,
-        None,
+        DEFAULT_MAX_ENTRY_SIZE,
       )
       .expect("Failed to store");
     }
@@ -1799,7 +1797,7 @@ mod tests {
       1000,
       None,
       None,
-      None,
+      DEFAULT_MAX_ENTRY_SIZE,
     );
     assert!(matches!(result, Err(StashError::EmptyOrTooLarge)));
   }
@@ -1813,7 +1811,7 @@ mod tests {
       1000,
       None,
       None,
-      None,
+      DEFAULT_MAX_ENTRY_SIZE,
     );
     assert!(matches!(result, Err(StashError::AllWhitespace)));
   }
@@ -1823,8 +1821,14 @@ mod tests {
     let db = test_db();
     // 5MB + 1 byte
     let data = vec![b'a'; 5 * 1_000_000 + 1];
-    let result =
-      db.store_entry(std::io::Cursor::new(data), 100, 1000, None, None, None);
+    let result = db.store_entry(
+      std::io::Cursor::new(data),
+      100,
+      1000,
+      None,
+      None,
+      DEFAULT_MAX_ENTRY_SIZE,
+    );
     assert!(matches!(result, Err(StashError::TooLarge(5000000))));
   }
 
@@ -1838,7 +1842,7 @@ mod tests {
         1000,
         None,
         None,
-        None,
+        DEFAULT_MAX_ENTRY_SIZE,
       )
       .expect("Failed to store");
 
@@ -1864,7 +1868,7 @@ mod tests {
       1000,
       None,
       None,
-      None,
+      DEFAULT_MAX_ENTRY_SIZE,
     )
     .expect("Failed to store");
     db.store_entry(
@@ -1873,7 +1877,7 @@ mod tests {
       1000,
       None,
       None,
-      None,
+      DEFAULT_MAX_ENTRY_SIZE,
     )
     .expect("Failed to store");
 
@@ -1900,7 +1904,7 @@ mod tests {
         1000,
         None,
         None,
-        None,
+        DEFAULT_MAX_ENTRY_SIZE,
       )
       .expect("Failed to store");
     }
@@ -1970,7 +1974,7 @@ mod tests {
         1000,
         None,
         None,
-        None,
+        DEFAULT_MAX_ENTRY_SIZE,
       )
       .expect("Failed to store");
 
