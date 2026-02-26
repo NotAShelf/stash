@@ -11,4 +11,3 @@ keys    = [ "package" ]
 
 [rule.formatting]
 reorder_keys = false
-
