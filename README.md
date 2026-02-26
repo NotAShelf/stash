@@ -20,7 +20,7 @@
 </div>
 
 <div align="center">
-  Lightweight Wayland clipboard "manager" with fast persistent history and
+  Lightweight & feature-rich Wayland clipboard "manager" with fast persistent history and
   robust multi-media support. Stores and previews clipboard entries (text, images)
   on the clipboard with a neat TUI and advanced scripting capabilities.
 </div>
@@ -28,7 +28,7 @@
 <div align="center">
   <br/>
   <a href="#features">Features</a><br/>
-  <a href="#installation">Installation</a> | <a href="#usage">Usage</a><br/>
+  <a href="#installation">Installation</a> | <a href="#usage">Usage</a> | <a href="#usage">Motivation</a>
   <a href="#tips--tricks">Tips and Tricks</a>
   <br/>
 </div>
@@ -375,6 +375,20 @@ be only copied to the clipboard.
 >
 > `stash --excluded-apps Bitwarden watch`
 
+## Motivation
+
+I've been a long-time user of Cliphist. You can probably tell by the number of
+times it has been mentioned in the README, if not for the attributions section,
+that Stash is _clearly_ inspired and adapted from it. It's actually a great
+clipboard manager if your needs are simple, but mine aren't. I need an
+**all-in-one** solution, that I can freely hack on, with simple solutions to
+complex problems that I've had with managing my clipboard. I wanted it to be
+scriptable _and_ interactive, I wanted it to be performant, I wanted it to be...
+
+You get the point. Perhaps you also share similar needs, or just like Rust
+software in general on your desktop. In either case, Stash hopes to serve as an
+excellent clipboard manager for your needs, with _excellent_ performance.
+
 ## Tips & Tricks
 
 ### Migrating from Cliphist
@@ -549,8 +563,14 @@ My thanks go first to [@YaLTeR](https://github.com/YaLTeR/) for the
 powered by [several crates](./Cargo.toml), but none of them were as detrimental
 in Stash's design process.
 
-Additional thanks to my testers, who have tested earlier versions of Stash and
-provided feedback. Thank you :)
+Secondly, but by no means less importantly, I would like to thank
+[cliphist](https://github.com/sentriz/cliphist) for the excellent reference it
+has provided to me as a "solid clipboard manager." The interface of Stash is
+inspired by Cliphist, and it has served me very well for a very long time.
+
+Additional and definitely heartfelt thanks to my testers, who have tested
+earlier versions of Stash, helped with packaging and provided feedback. Thank
+you :)
 
 ## License
 
