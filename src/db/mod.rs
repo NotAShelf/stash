@@ -22,6 +22,10 @@ pub enum StashError {
   EmptyOrTooLarge,
   #[error("Input is all whitespace, skipping store.")]
   AllWhitespace,
+  #[error("Entry too small (min size: {0} bytes), skipping store.")]
+  TooSmall(usize),
+  #[error("Entry too large (max size: {0} bytes), skipping store.")]
+  TooLarge(usize),
 
   #[error("Failed to store entry: {0}")]
   Store(Box<str>),
@@ -65,6 +69,8 @@ pub trait ClipboardDb {
     max_dedupe_search: u64,
     max_items: u64,
     excluded_apps: Option<&[String]>,
+    min_size: Option<usize>,
+    max_size: Option<usize>,
   ) -> Result<i64, StashError>;
 
   fn deduplicate_by_hash(
@@ -410,14 +416,30 @@ impl ClipboardDb for SqliteClipboardDb {
     max_dedupe_search: u64,
     max_items: u64,
     excluded_apps: Option<&[String]>,
+    min_size: Option<usize>,
+    max_size: Option<usize>,
   ) -> Result<i64, StashError> {
     let mut buf = Vec::new();
-    if input.read_to_end(&mut buf).is_err()
-      || buf.is_empty()
-      || buf.len() > 5 * 1_000_000
-    {
+    if input.read_to_end(&mut buf).is_err() || buf.is_empty() {
       return Err(StashError::EmptyOrTooLarge);
     }
+
+    let size = buf.len();
+
+    if let Some(min) = min_size
+      && size < min
+    {
+      return Err(StashError::TooSmall(min));
+    }
+
+    if let Some(max) = max_size {
+      if size > max {
+        return Err(StashError::TooLarge(max));
+      }
+    } else if size > 5 * 1_000_000 {
+      return Err(StashError::TooLarge(5 * 1_000_000));
+    }
+
     if buf.iter().all(u8::is_ascii_whitespace) {
       return Err(StashError::AllWhitespace);
     }
@@ -1514,7 +1536,7 @@ mod tests {
     let cursor = std::io::Cursor::new(test_data.to_vec());
 
     let id = db
-      .store_entry(cursor, 100, 1000, None)
+      .store_entry(cursor, 100, 1000, None, None, None)
       .expect("Failed to store entry");
 
     let content_hash: Option<i64> = db
@@ -1549,7 +1571,7 @@ mod tests {
     let test_data = b"Test content for copy";
     let cursor = std::io::Cursor::new(test_data.to_vec());
     let id_a = db
-      .store_entry(cursor, 100, 1000, None)
+      .store_entry(cursor, 100, 1000, None, None, None)
       .expect("Failed to store entry A");
 
     let original_last_accessed: i64 = db
@@ -1644,7 +1666,14 @@ mod tests {
     let db = test_db();
     let data = b"file:///home/user/document.pdf\nfile:///home/user/image.png";
     let id = db
-      .store_entry(std::io::Cursor::new(data.to_vec()), 100, 1000, None)
+      .store_entry(
+        std::io::Cursor::new(data.to_vec()),
+        100,
+        1000,
+        None,
+        None,
+        None,
+      )
       .expect("Failed to store URI list");
 
     let mime: Option<String> = db
@@ -1670,7 +1699,14 @@ mod tests {
       0x90, 0x77, 0x53, 0xDE, // CRC
     ];
     let id = db
-      .store_entry(std::io::Cursor::new(data.clone()), 100, 1000, None)
+      .store_entry(
+        std::io::Cursor::new(data.clone()),
+        100,
+        1000,
+        None,
+        None,
+        None,
+      )
       .expect("Failed to store image");
 
     let (contents, mime): (Vec<u8>, Option<String>) = db
@@ -1691,10 +1727,24 @@ mod tests {
     let data = b"duplicate content";
 
     let id1 = db
-      .store_entry(std::io::Cursor::new(data.to_vec()), 100, 1000, None)
+      .store_entry(
+        std::io::Cursor::new(data.to_vec()),
+        100,
+        1000,
+        None,
+        None,
+        None,
+      )
       .expect("Failed to store first");
     let _id2 = db
-      .store_entry(std::io::Cursor::new(data.to_vec()), 100, 1000, None)
+      .store_entry(
+        std::io::Cursor::new(data.to_vec()),
+        100,
+        1000,
+        None,
+        None,
+        None,
+      )
       .expect("Failed to store second");
 
     // First entry should have been removed by deduplication
@@ -1727,6 +1777,8 @@ mod tests {
         100,
         3, // max 3 items
         None,
+        None,
+        None,
       )
       .expect("Failed to store");
     }
@@ -1741,8 +1793,14 @@ mod tests {
   #[test]
   fn test_reject_empty_input() {
     let db = test_db();
-    let result =
-      db.store_entry(std::io::Cursor::new(Vec::new()), 100, 1000, None);
+    let result = db.store_entry(
+      std::io::Cursor::new(Vec::new()),
+      100,
+      1000,
+      None,
+      None,
+      None,
+    );
     assert!(matches!(result, Err(StashError::EmptyOrTooLarge)));
   }
 
@@ -1754,6 +1812,8 @@ mod tests {
       100,
       1000,
       None,
+      None,
+      None,
     );
     assert!(matches!(result, Err(StashError::AllWhitespace)));
   }
@@ -1763,15 +1823,23 @@ mod tests {
     let db = test_db();
     // 5MB + 1 byte
     let data = vec![b'a'; 5 * 1_000_000 + 1];
-    let result = db.store_entry(std::io::Cursor::new(data), 100, 1000, None);
-    assert!(matches!(result, Err(StashError::EmptyOrTooLarge)));
+    let result =
+      db.store_entry(std::io::Cursor::new(data), 100, 1000, None, None, None);
+    assert!(matches!(result, Err(StashError::TooLarge(5000000))));
   }
 
   #[test]
   fn test_delete_entries_by_id() {
     let db = test_db();
     let id = db
-      .store_entry(std::io::Cursor::new(b"to delete".to_vec()), 100, 1000, None)
+      .store_entry(
+        std::io::Cursor::new(b"to delete".to_vec()),
+        100,
+        1000,
+        None,
+        None,
+        None,
+      )
       .expect("Failed to store");
 
     let input = format!("{id}\tpreview text\n");
@@ -1795,12 +1863,16 @@ mod tests {
       100,
       1000,
       None,
+      None,
+      None,
     )
     .expect("Failed to store");
     db.store_entry(
       std::io::Cursor::new(b"normal text".to_vec()),
       100,
       1000,
+      None,
+      None,
       None,
     )
     .expect("Failed to store");
@@ -1822,8 +1894,15 @@ mod tests {
     let db = test_db();
     for i in 0..3 {
       let data = format!("entry {i}");
-      db.store_entry(std::io::Cursor::new(data.into_bytes()), 100, 1000, None)
-        .expect("Failed to store");
+      db.store_entry(
+        std::io::Cursor::new(data.into_bytes()),
+        100,
+        1000,
+        None,
+        None,
+        None,
+      )
+      .expect("Failed to store");
     }
 
     db.wipe_db().expect("Failed to wipe");
@@ -1885,7 +1964,14 @@ mod tests {
     let db = test_db();
     let data = b"copy me";
     let id = db
-      .store_entry(std::io::Cursor::new(data.to_vec()), 100, 1000, None)
+      .store_entry(
+        std::io::Cursor::new(data.to_vec()),
+        100,
+        1000,
+        None,
+        None,
+        None,
+      )
       .expect("Failed to store");
 
     let (returned_id, contents, mime) =
