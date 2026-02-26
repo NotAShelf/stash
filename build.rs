@@ -4,6 +4,9 @@ use std::{env, fs, path::Path};
 const MULTICALL_LINKS: &[&str] =
   &["stash-copy", "stash-paste", "wl-copy", "wl-paste"];
 
+/// Wayland-specific symlinks that can be disabled separately
+const WAYLAND_LINKS: &[&str] = &["wl-copy", "wl-paste"];
+
 fn main() {
   // OUT_DIR is something like .../target/debug/build/<pkg>/out
   // We want .../target/debug or .../target/release
@@ -16,8 +19,24 @@ fn main() {
   // Path to the main stash binary
   let stash_bin = bin_dir.join("stash");
 
+  // Check for environment variables to disable symlinking
+  let disable_all_symlinks = env::var("STASH_NO_SYMLINKS").is_ok();
+  let disable_wayland_symlinks = env::var("STASH_NO_WL_SYMLINKS").is_ok();
+
   // Create symlinks for each multicall binary
   for link in MULTICALL_LINKS {
+    if disable_all_symlinks {
+      println!("cargo:warning=Skipping symlink {link} (all symlinks disabled)");
+      continue;
+    }
+
+    if disable_wayland_symlinks && WAYLAND_LINKS.contains(link) {
+      println!(
+        "cargo:warning=Skipping symlink {link} (wayland symlinks disabled)"
+      );
+      continue;
+    }
+
     let link_path = bin_dir.join(link);
     // Remove existing symlink or file if present
     let _ = fs::remove_file(&link_path);
