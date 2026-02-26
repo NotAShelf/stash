@@ -7,7 +7,7 @@ authors      = [ "NotAShelf <raf@notashelf.dev>" ]
 license      = "MPL-2.0"
 readme       = true
 repository   = "https://github.com/notashelf/stash"
-rust-version = "1.90"
+rust-version = "1.91.0"
 
 [[bin]]
 name = "stash"       # actual binary name for Nix, Cargo, etc.
