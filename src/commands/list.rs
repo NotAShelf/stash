@@ -27,6 +27,178 @@ impl ListCommand for SqliteClipboardDb {
   }
 }
 
+/// All mutable state for the TUI list view.
+struct TuiState {
+  /// Total number of entries matching the current filter in the DB.
+  total: usize,
+
+  /// Global cursor position: index into the full ordered result set.
+  cursor: usize,
+
+  /// DB offset of `window[0]`, i.e., the first row currently loaded.
+  viewport_offset: usize,
+
+  /// The loaded slice of entries: `(id, preview, mime)`.
+  window: Vec<(i64, String, String)>,
+
+  /// How many rows the window holds (== visible list height).
+  window_size: usize,
+
+  /// Whether the window needs to be re-fetched from the DB.
+  dirty: bool,
+}
+
+impl TuiState {
+  /// Create initial state: count total rows, load the first window.
+  fn new(
+    db: &SqliteClipboardDb,
+    include_expired: bool,
+    window_size: usize,
+    preview_width: u32,
+  ) -> Result<Self, StashError> {
+    let total = db.count_entries(include_expired)?;
+    let window = if total > 0 {
+      db.fetch_entries_window(include_expired, 0, window_size, preview_width)?
+    } else {
+      Vec::new()
+    };
+    Ok(Self {
+      total,
+      cursor: 0,
+      viewport_offset: 0,
+      window,
+      window_size,
+      dirty: false,
+    })
+  }
+
+  /// Return the cursor position relative to the current window
+  /// (`window[local_cursor]` == the selected entry).
+  #[inline]
+  fn local_cursor(&self) -> usize {
+    self.cursor.saturating_sub(self.viewport_offset)
+  }
+
+  /// Return the selected `(id, preview, mime)` if any entry is selected.
+  fn selected_entry(&self) -> Option<&(i64, String, String)> {
+    if self.total == 0 {
+      return None;
+    }
+    self.window.get(self.local_cursor())
+  }
+
+  /// Move the cursor down by one, wrapping to 0 at the bottom.
+  fn move_down(&mut self) {
+    if self.total == 0 {
+      return;
+    }
+    self.cursor = if self.cursor + 1 >= self.total {
+      0
+    } else {
+      self.cursor + 1
+    };
+    self.dirty = true;
+  }
+
+  /// Move the cursor up by one, wrapping to `total - 1` at the top.
+  fn move_up(&mut self) {
+    if self.total == 0 {
+      return;
+    }
+    self.cursor = if self.cursor == 0 {
+      self.total - 1
+    } else {
+      self.cursor - 1
+    };
+    self.dirty = true;
+  }
+
+  /// Resize the window (e.g. terminal resized).  Marks dirty so the
+  /// viewport is reloaded on the next frame.
+  fn resize(&mut self, new_size: usize) {
+    if new_size != self.window_size {
+      self.window_size = new_size;
+      self.dirty = true;
+    }
+  }
+
+  /// After a delete the total shrinks by one and the cursor may need
+  /// clamping.  The caller is responsible for the DB deletion itself.
+  fn on_delete(&mut self) {
+    if self.total == 0 {
+      return;
+    }
+    self.total -= 1;
+    if self.total == 0 {
+      self.cursor = 0;
+    } else if self.cursor >= self.total {
+      self.cursor = self.total - 1;
+    }
+    self.dirty = true;
+  }
+
+  /// Reload the window from the DB if `dirty` is set or if the cursor
+  /// has drifted outside the currently loaded range.
+  fn sync(
+    &mut self,
+    db: &SqliteClipboardDb,
+    include_expired: bool,
+    preview_width: u32,
+  ) -> Result<(), StashError> {
+    let cursor_out_of_window = self.cursor < self.viewport_offset
+      || self.cursor >= self.viewport_offset + self.window.len().max(1);
+
+    if !self.dirty && !cursor_out_of_window {
+      return Ok(());
+    }
+
+    // Re-anchor the viewport so the cursor sits in the upper half when
+    // scrolling downward, or at a sensible position when wrapping.
+    let half = self.window_size / 2;
+    self.viewport_offset = if self.cursor >= half {
+      (self.cursor - half).min(self.total.saturating_sub(self.window_size))
+    } else {
+      0
+    };
+
+    self.window = if self.total > 0 {
+      db.fetch_entries_window(
+        include_expired,
+        self.viewport_offset,
+        self.window_size,
+        preview_width,
+      )?
+    } else {
+      Vec::new()
+    };
+    self.dirty = false;
+    Ok(())
+  }
+}
+
+/// Query the maximum id digit-width and maximum mime byte-length across
+/// all entries.  This is pretty damn fast as it touches only index/metadata,
+/// not blobs.
+fn global_column_widths(
+  db: &SqliteClipboardDb,
+  include_expired: bool,
+) -> Result<(usize, usize), StashError> {
+  let filter = if include_expired {
+    ""
+  } else {
+    "WHERE (is_expired IS NULL OR is_expired = 0)"
+  };
+  let query = format!(
+    "SELECT COALESCE(MAX(LENGTH(CAST(id AS TEXT))), 2), \
+     COALESCE(MAX(LENGTH(mime)), 8) FROM clipboard {filter}"
+  );
+  let (id_w, mime_w): (i64, i64) = db
+    .conn
+    .query_row(&query, [], |r| Ok((r.get(0)?, r.get(1)?)))
+    .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+  Ok((id_w.max(2) as usize, mime_w.max(8) as usize))
+}
+
 impl SqliteClipboardDb {
   #[allow(clippy::too_many_lines)]
   pub fn list_tui(
@@ -63,46 +235,9 @@ impl SqliteClipboardDb {
     };
     use wl_clipboard_rs::copy::{MimeType, Options, Source};
 
-    // Query entries from DB
-    let query = if include_expired {
-      "SELECT id, contents, mime FROM clipboard ORDER BY last_accessed DESC, \
-       id DESC"
-    } else {
-      "SELECT id, contents, mime FROM clipboard WHERE (is_expired IS NULL OR \
-       is_expired = 0) ORDER BY last_accessed DESC, id DESC"
-    };
-    let mut stmt = self
-      .conn
-      .prepare(query)
-      .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
-    let mut rows = stmt
-      .query([])
-      .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
-
-    let mut entries: Vec<(i64, String, String)> = Vec::new();
-    let mut max_id_width = 2;
-    let mut max_mime_width = 8;
-    while let Some(row) = rows
-      .next()
-      .map_err(|e| StashError::ListDecode(e.to_string().into()))?
-    {
-      let id: i64 = row
-        .get(0)
-        .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
-      let contents: Vec<u8> = row
-        .get(1)
-        .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
-      let mime: Option<String> = row
-        .get(2)
-        .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
-      let preview =
-        crate::db::preview_entry(&contents, mime.as_deref(), preview_width);
-      let mime_str = mime.as_deref().unwrap_or("").to_string();
-      let id_str = id.to_string();
-      max_id_width = max_id_width.max(id_str.width());
-      max_mime_width = max_mime_width.max(mime_str.width());
-      entries.push((id, preview, mime_str));
-    }
+    // One-time column-width metadata (no blob reads).
+    let (max_id_width, max_mime_width) =
+      global_column_widths(self, include_expired)?;
 
     enable_raw_mode()
       .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
@@ -113,13 +248,91 @@ impl SqliteClipboardDb {
     let mut terminal = Terminal::new(backend)
       .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
 
-    let mut state = ListState::default();
-    if !entries.is_empty() {
-      state.select(Some(0));
+    // Derive initial window size from current terminal height.
+    let initial_height = terminal
+      .size()
+      .map(|r| r.height.saturating_sub(2) as usize)
+      .unwrap_or(24);
+    let initial_height = initial_height.max(1);
+
+    let mut tui =
+      TuiState::new(self, include_expired, initial_height, preview_width)?;
+
+    // ratatui ListState; only tracks selection within the *window* slice.
+    let mut list_state = ListState::default();
+    if tui.total > 0 {
+      list_state.select(Some(0));
     }
 
-    let res = (|| -> Result<(), StashError> {
-      loop {
+    /// Accumulated actions from draining the event queue.
+    struct EventActions {
+      quit:     bool,
+      net_down: i64, // positive=down, negative=up, 0=none
+      copy:     bool,
+      delete:   bool,
+    }
+
+    /// Drain all pending key events and return what actions to perform.
+    /// Navigation is capped to ±1 per frame to prevent jumpy scrolling when
+    /// the key-repeat rate exceeds the render frame rate.
+    fn drain_events() -> Result<EventActions, StashError> {
+      let mut actions = EventActions {
+        quit:     false,
+        net_down: 0,
+        copy:     false,
+        delete:   false,
+      };
+
+      while event::poll(std::time::Duration::from_millis(0))
+        .map_err(|e| StashError::ListDecode(e.to_string().into()))?
+      {
+        if let Event::Key(key) = event::read()
+          .map_err(|e| StashError::ListDecode(e.to_string().into()))?
+        {
+          match (key.code, key.modifiers) {
+            (KeyCode::Char('q') | KeyCode::Esc, _) => actions.quit = true,
+            (KeyCode::Down | KeyCode::Char('j'), _) => {
+              // Cap at +1 per frame for smooth scrolling
+              if actions.net_down < 1 {
+                actions.net_down += 1;
+              }
+            },
+            (KeyCode::Up | KeyCode::Char('k'), _) => {
+              // Cap at -1 per frame for smooth scrolling
+              if actions.net_down > -1 {
+                actions.net_down -= 1;
+              }
+            },
+            (KeyCode::Enter, _) => actions.copy = true,
+            (KeyCode::Char('D'), KeyModifiers::SHIFT) => actions.delete = true,
+            _ => {},
+          }
+        }
+      }
+      Ok(actions)
+    }
+
+    let draw_frame =
+      |terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+       tui: &mut TuiState,
+       list_state: &mut ListState,
+       max_id_width: usize,
+       max_mime_width: usize|
+       -> Result<(), StashError> {
+        let term_height = terminal
+          .size()
+          .map(|r| r.height.saturating_sub(2) as usize)
+          .unwrap_or(24)
+          .max(1);
+        tui.resize(term_height);
+        tui.sync(self, include_expired, preview_width)?;
+
+        if tui.total == 0 {
+          list_state.select(None);
+        } else {
+          list_state.select(Some(tui.local_cursor()));
+        }
+
         terminal
           .draw(|f| {
             let area = f.area();
@@ -135,13 +348,11 @@ impl SqliteClipboardDb {
             let highlight_width = 1;
             let content_width = area.width as usize - border_width;
 
-            // Minimum widths for columns
             let min_id_width = 2;
             let min_mime_width = 6;
             let min_preview_width = 4;
-            let spaces = 3; // [id][ ][preview][ ][mime]
+            let spaces = 3;
 
-            // Dynamically allocate widths
             let mut id_col = max_id_width.max(min_id_width);
             let mut mime_col = max_mime_width.max(min_mime_width);
             let mut preview_col = content_width
@@ -150,7 +361,6 @@ impl SqliteClipboardDb {
               .saturating_sub(mime_col)
               .saturating_sub(spaces);
 
-            // If not enough space, shrink columns
             if preview_col < min_preview_width {
               let needed = min_preview_width - preview_col;
               if mime_col > min_mime_width {
@@ -173,13 +383,13 @@ impl SqliteClipboardDb {
               preview_col = min_preview_width;
             }
 
-            let selected = state.selected();
+            let selected = list_state.selected();
 
-            let list_items: Vec<ListItem> = entries
+            let list_items: Vec<ListItem> = tui
+              .window
               .iter()
               .enumerate()
               .map(|(i, entry)| {
-                // Truncate preview by grapheme clusters and display width
                 let mut preview = String::new();
                 let mut width = 0;
                 for g in entry.1.graphemes(true) {
@@ -191,7 +401,6 @@ impl SqliteClipboardDb {
                   preview.push_str(g);
                   width += g_width;
                 }
-                // Truncate and pad mimetype
                 let mut mime = String::new();
                 let mut mwidth = 0;
                 for g in entry.2.graphemes(true) {
@@ -204,8 +413,6 @@ impl SqliteClipboardDb {
                   mwidth += g_width;
                 }
 
-                // Compose the row as highlight + id + space + preview + space +
-                // mimetype
                 let mut spans = Vec::new();
                 let (id, preview, mime) = entry;
                 if Some(i) == selected {
@@ -252,133 +459,109 @@ impl SqliteClipboardDb {
                   .fg(Color::Yellow)
                   .add_modifier(Modifier::BOLD),
               )
-              .highlight_symbol(""); // handled manually
+              .highlight_symbol("");
 
-            f.render_stateful_widget(list, area, &mut state);
+            f.render_stateful_widget(list, area, list_state);
           })
           .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+        Ok(())
+      };
 
+    // Initial draw.
+    draw_frame(
+      &mut terminal,
+      &mut tui,
+      &mut list_state,
+      max_id_width,
+      max_mime_width,
+    )?;
+
+    let res = (|| -> Result<(), StashError> {
+      loop {
+        // Block waiting for events, then drain and process all queued input.
         if event::poll(std::time::Duration::from_millis(250))
           .map_err(|e| StashError::ListDecode(e.to_string().into()))?
-          && let Event::Key(key) = event::read()
-            .map_err(|e| StashError::ListDecode(e.to_string().into()))?
         {
-          match (key.code, key.modifiers) {
-            (KeyCode::Char('q') | KeyCode::Esc, _) => break,
-            (KeyCode::Down | KeyCode::Char('j'), _) => {
-              if entries.is_empty() {
-                state.select(None);
-              } else {
-                let i = match state.selected() {
-                  Some(i) => {
-                    if i >= entries.len() - 1 {
-                      0
-                    } else {
-                      i + 1
-                    }
-                  },
-                  None => 0,
+          let actions = drain_events()?;
+
+          if actions.quit {
+            break;
+          }
+
+          // Apply navigation (capped at ±1 per frame for smooth scrolling).
+          if actions.net_down > 0 {
+            tui.move_down();
+          } else if actions.net_down < 0 {
+            tui.move_up();
+          }
+
+          if actions.delete
+            && let Some(&(id, ..)) = tui.selected_entry()
+          {
+            self
+              .conn
+              .execute(
+                "DELETE FROM clipboard WHERE id = ?1",
+                rusqlite::params![id],
+              )
+              .map_err(|e| StashError::DeleteEntry(id, e.to_string().into()))?;
+            tui.on_delete();
+            let _ = Notification::new()
+              .summary("Stash")
+              .body("Deleted entry")
+              .show();
+          }
+
+          if actions.copy
+            && let Some(&(id, ..)) = tui.selected_entry()
+          {
+            match self.copy_entry(id) {
+              Ok((new_id, contents, mime)) => {
+                if new_id != id {
+                  tui.dirty = true;
+                }
+                let opts = Options::new();
+                let mime_type = match mime {
+                  Some(ref m) if m == "text/plain" => MimeType::Text,
+                  Some(ref m) => MimeType::Specific(m.clone().to_owned()),
+                  None => MimeType::Text,
                 };
-                state.select(Some(i));
-              }
-            },
-            (KeyCode::Up | KeyCode::Char('k'), _) => {
-              if entries.is_empty() {
-                state.select(None);
-              } else {
-                let i = match state.selected() {
-                  Some(i) => {
-                    if i == 0 {
-                      entries.len() - 1
-                    } else {
-                      i - 1
-                    }
-                  },
-                  None => 0,
-                };
-                state.select(Some(i));
-              }
-            },
-            (KeyCode::Enter, _) => {
-              if let Some(idx) = state.selected()
-                && let Some((id, ..)) = entries.get(idx)
-              {
-                match self.copy_entry(*id) {
-                  Ok((new_id, contents, mime)) => {
-                    if new_id != *id {
-                      entries[idx] = (
-                        new_id,
-                        entries[idx].1.clone(),
-                        entries[idx].2.clone(),
-                      );
-                    }
-                    let opts = Options::new();
-                    let mime_type = match mime {
-                      Some(ref m) if m == "text/plain" => MimeType::Text,
-                      Some(ref m) => MimeType::Specific(m.clone().to_owned()),
-                      None => MimeType::Text,
-                    };
-                    let copy_result = opts
-                      .copy(Source::Bytes(contents.clone().into()), mime_type);
-                    match copy_result {
-                      Ok(()) => {
-                        let _ = Notification::new()
-                          .summary("Stash")
-                          .body("Copied entry to clipboard")
-                          .show();
-                      },
-                      Err(e) => {
-                        log::error!("Failed to copy entry to clipboard: {e}");
-                        let _ = Notification::new()
-                          .summary("Stash")
-                          .body(&format!("Failed to copy to clipboard: {e}"))
-                          .show();
-                      },
-                    }
-                  },
-                  Err(e) => {
-                    log::error!("Failed to fetch entry {id}: {e}");
+                let copy_result =
+                  opts.copy(Source::Bytes(contents.clone().into()), mime_type);
+                match copy_result {
+                  Ok(()) => {
                     let _ = Notification::new()
                       .summary("Stash")
-                      .body(&format!("Failed to fetch entry: {e}"))
+                      .body("Copied entry to clipboard")
+                      .show();
+                  },
+                  Err(e) => {
+                    log::error!("Failed to copy entry to clipboard: {e}");
+                    let _ = Notification::new()
+                      .summary("Stash")
+                      .body(&format!("Failed to copy to clipboard: {e}"))
                       .show();
                   },
                 }
-              }
-            },
-            (KeyCode::Char('D'), KeyModifiers::SHIFT) => {
-              if let Some(idx) = state.selected()
-                && let Some((id, ..)) = entries.get(idx)
-              {
-                // Delete entry from DB
-                self
-                  .conn
-                  .execute(
-                    "DELETE FROM clipboard WHERE id = ?1",
-                    rusqlite::params![id],
-                  )
-                  .map_err(|e| {
-                    StashError::DeleteEntry(*id, e.to_string().into())
-                  })?;
-                // Remove from entries and update selection
-                entries.remove(idx);
-                let new_len = entries.len();
-                if new_len == 0 {
-                  state.select(None);
-                } else if idx >= new_len {
-                  state.select(Some(new_len - 1));
-                } else {
-                  state.select(Some(idx));
-                }
-                // Show notification
+              },
+              Err(e) => {
+                log::error!("Failed to fetch entry {id}: {e}");
                 let _ = Notification::new()
                   .summary("Stash")
-                  .body("Deleted entry")
+                  .body(&format!("Failed to fetch entry: {e}"))
                   .show();
-              }
-            },
-            _ => {},
+              },
+            }
           }
+
+          // Redraw once after processing all accumulated input.
+          draw_frame(
+            &mut terminal,
+            &mut tui,
+            &mut list_state,
+            max_id_width,
+            max_mime_width,
+          )?;
         }
       }
       Ok(())

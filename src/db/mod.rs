@@ -734,6 +734,76 @@ impl ClipboardDb for SqliteClipboardDb {
 }
 
 impl SqliteClipboardDb {
+  /// Count visible clipboard entries (respects include_expired filter).
+  pub fn count_entries(
+    &self,
+    include_expired: bool,
+  ) -> Result<usize, StashError> {
+    let count: i64 = if include_expired {
+      self
+        .conn
+        .query_row("SELECT COUNT(*) FROM clipboard", [], |r| r.get(0))
+    } else {
+      self.conn.query_row(
+        "SELECT COUNT(*) FROM clipboard WHERE (is_expired IS NULL OR \
+         is_expired = 0)",
+        [],
+        |r| r.get(0),
+      )
+    }
+    .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+    Ok(count.max(0) as usize)
+  }
+
+  /// Fetch a window of entries for TUI virtual scrolling.
+  ///
+  /// Returns `(id, preview_string, mime_string)` tuples for at most
+  /// `limit` rows starting at `offset` (0-indexed) in the canonical
+  /// display order (most-recently-accessed first, then id DESC).
+  pub fn fetch_entries_window(
+    &self,
+    include_expired: bool,
+    offset: usize,
+    limit: usize,
+    preview_width: u32,
+  ) -> Result<Vec<(i64, String, String)>, StashError> {
+    let query = if include_expired {
+      "SELECT id, contents, mime FROM clipboard ORDER BY \
+       COALESCE(last_accessed, 0) DESC, id DESC LIMIT ?1 OFFSET ?2"
+    } else {
+      "SELECT id, contents, mime FROM clipboard WHERE (is_expired IS NULL OR \
+       is_expired = 0) ORDER BY COALESCE(last_accessed, 0) DESC, id DESC LIMIT \
+       ?1 OFFSET ?2"
+    };
+    let mut stmt = self
+      .conn
+      .prepare(query)
+      .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+    let mut rows = stmt
+      .query(rusqlite::params![limit as i64, offset as i64])
+      .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+
+    let mut window = Vec::with_capacity(limit);
+    while let Some(row) = rows
+      .next()
+      .map_err(|e| StashError::ListDecode(e.to_string().into()))?
+    {
+      let id: i64 = row
+        .get(0)
+        .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+      let contents: Vec<u8> = row
+        .get(1)
+        .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+      let mime: Option<String> = row
+        .get(2)
+        .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+      let preview = preview_entry(&contents, mime.as_deref(), preview_width);
+      let mime_str = mime.unwrap_or_default();
+      window.push((id, preview, mime_str));
+    }
+    Ok(window)
+  }
+
   /// Get current Unix timestamp with sub-second precision
   pub fn now() -> f64 {
     std::time::SystemTime::now()
