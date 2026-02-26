@@ -734,6 +734,134 @@ impl ClipboardDb for SqliteClipboardDb {
 }
 
 impl SqliteClipboardDb {
+  /// Count visible clipboard entries, with respect to `include_expired` and
+  /// optional search filter.
+  pub fn count_entries(
+    &self,
+    include_expired: bool,
+    search: Option<&str>,
+  ) -> Result<usize, StashError> {
+    let search_pattern = search.map(|s| {
+      // Avoid backslash escaping issues
+      let escaped = s.replace('!', "!!").replace('%', "!%").replace('_', "!_");
+      format!("%{escaped}%")
+    });
+
+    let count: i64 = match (include_expired, search_pattern.as_deref()) {
+      (true, None) => {
+        self
+          .conn
+          .query_row("SELECT COUNT(*) FROM clipboard", [], |r| r.get(0))
+      },
+      (true, Some(pattern)) => {
+        self.conn.query_row(
+          "SELECT COUNT(*) FROM clipboard WHERE (LOWER(CAST(contents AS \
+           TEXT)) LIKE LOWER(?1) ESCAPE '!')",
+          [pattern],
+          |r| r.get(0),
+        )
+      },
+      (false, None) => {
+        self.conn.query_row(
+          "SELECT COUNT(*) FROM clipboard WHERE (is_expired IS NULL OR \
+           is_expired = 0)",
+          [],
+          |r| r.get(0),
+        )
+      },
+      (false, Some(pattern)) => {
+        self.conn.query_row(
+          "SELECT COUNT(*) FROM clipboard WHERE (is_expired IS NULL OR \
+           is_expired = 0) AND (LOWER(CAST(contents AS TEXT)) LIKE LOWER(?1) \
+           ESCAPE '!')",
+          [pattern],
+          |r| r.get(0),
+        )
+      },
+    }
+    .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+    Ok(count.max(0) as usize)
+  }
+
+  /// Fetch a window of entries for TUI virtual scrolling.
+  ///
+  /// Returns `(id, preview_string, mime_string)` tuples for at most
+  /// `limit` rows starting at `offset` (0-indexed) in the canonical
+  /// display order (most-recently-accessed first, then id DESC).
+  /// Optionally filters by search query in a case-insensitive nabber on text
+  /// content.
+  pub fn fetch_entries_window(
+    &self,
+    include_expired: bool,
+    offset: usize,
+    limit: usize,
+    preview_width: u32,
+    search: Option<&str>,
+  ) -> Result<Vec<(i64, String, String)>, StashError> {
+    let search_pattern = search.map(|s| {
+      let escaped = s.replace('!', "!!").replace('%', "!%").replace('_', "!_");
+      format!("%{escaped}%")
+    });
+
+    let query = match (include_expired, search_pattern.as_deref()) {
+      (true, None) => {
+        "SELECT id, contents, mime FROM clipboard ORDER BY \
+         COALESCE(last_accessed, 0) DESC, id DESC LIMIT ?1 OFFSET ?2"
+      },
+      (true, Some(_)) => {
+        "SELECT id, contents, mime FROM clipboard WHERE (LOWER(CAST(contents \
+         AS TEXT)) LIKE LOWER(?3) ESCAPE '!') ORDER BY COALESCE(last_accessed, \
+         0) DESC, id DESC LIMIT ?1 OFFSET ?2"
+      },
+      (false, None) => {
+        "SELECT id, contents, mime FROM clipboard WHERE (is_expired IS NULL OR \
+         is_expired = 0) ORDER BY COALESCE(last_accessed, 0) DESC, id DESC \
+         LIMIT ?1 OFFSET ?2"
+      },
+      (false, Some(_)) => {
+        "SELECT id, contents, mime FROM clipboard WHERE (is_expired IS NULL OR \
+         is_expired = 0) AND (LOWER(CAST(contents AS TEXT)) LIKE LOWER(?3) \
+         ESCAPE '!') ORDER BY COALESCE(last_accessed, 0) DESC, id DESC LIMIT \
+         ?1 OFFSET ?2"
+      },
+    };
+
+    let mut stmt = self
+      .conn
+      .prepare(query)
+      .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+
+    let mut rows = if let Some(pattern) = search_pattern.as_deref() {
+      stmt
+        .query(rusqlite::params![limit as i64, offset as i64, pattern])
+        .map_err(|e| StashError::ListDecode(e.to_string().into()))?
+    } else {
+      stmt
+        .query(rusqlite::params![limit as i64, offset as i64])
+        .map_err(|e| StashError::ListDecode(e.to_string().into()))?
+    };
+
+    let mut window = Vec::with_capacity(limit);
+    while let Some(row) = rows
+      .next()
+      .map_err(|e| StashError::ListDecode(e.to_string().into()))?
+    {
+      let id: i64 = row
+        .get(0)
+        .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+      let contents: Vec<u8> = row
+        .get(1)
+        .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+      let mime: Option<String> = row
+        .get(2)
+        .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+      let preview = preview_entry(&contents, mime.as_deref(), preview_width);
+      let mime_str = mime.unwrap_or_default();
+      window.push((id, preview, mime_str));
+    }
+    Ok(window)
+  }
+
   /// Get current Unix timestamp with sub-second precision
   pub fn now() -> f64 {
     std::time::SystemTime::now()
