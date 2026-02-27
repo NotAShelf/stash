@@ -91,6 +91,10 @@ enum Command {
     /// Show only expired entries (diagnostic, does not remove them)
     #[arg(long)]
     expired: bool,
+
+    /// Reverse the order of entries (oldest first instead of newest first)
+    #[arg(long)]
+    reverse: bool,
   },
 
   /// Decode and output clipboard entry by id
@@ -245,16 +249,20 @@ fn main() -> color_eyre::eyre::Result<()> {
           "failed to store entry",
         );
       },
-      Some(Command::List { format, expired }) => {
+      Some(Command::List {
+        format,
+        expired,
+        reverse,
+      }) => {
         match format.as_deref() {
           Some("tsv") => {
             report_error(
-              db.list(io::stdout(), cli.preview_width, expired),
+              db.list(io::stdout(), cli.preview_width, expired, reverse),
               "failed to list entries",
             );
           },
           Some("json") => {
-            match db.list_json(expired) {
+            match db.list_json(expired, reverse) {
               Ok(json) => {
                 println!("{json}");
               },
@@ -269,12 +277,12 @@ fn main() -> color_eyre::eyre::Result<()> {
           None => {
             if std::io::stdout().is_terminal() {
               report_error(
-                db.list_tui(cli.preview_width, expired),
+                db.list_tui(cli.preview_width, expired, reverse),
                 "failed to list entries in TUI",
               );
             } else {
               report_error(
-                db.list(io::stdout(), cli.preview_width, expired),
+                db.list(io::stdout(), cli.preview_width, expired, reverse),
                 "failed to list entries",
               );
             }

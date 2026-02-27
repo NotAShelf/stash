@@ -89,6 +89,7 @@ pub trait ClipboardDb {
     out: impl Write,
     preview_width: u32,
     include_expired: bool,
+    reverse: bool,
   ) -> Result<usize, StashError>;
   fn decode_entry(
     &self,
@@ -362,17 +363,27 @@ impl SqliteClipboardDb {
 }
 
 impl SqliteClipboardDb {
-  pub fn list_json(&self, include_expired: bool) -> Result<String, StashError> {
+  pub fn list_json(
+    &self,
+    include_expired: bool,
+    reverse: bool,
+  ) -> Result<String, StashError> {
+    let order = if reverse { "ASC" } else { "DESC" };
     let query = if include_expired {
-      "SELECT id, contents, mime FROM clipboard ORDER BY \
-       COALESCE(last_accessed, 0) DESC, id DESC"
+      format!(
+        "SELECT id, contents, mime FROM clipboard ORDER BY \
+         COALESCE(last_accessed, 0) {order}, id {order}"
+      )
     } else {
-      "SELECT id, contents, mime FROM clipboard WHERE (is_expired IS NULL OR \
-       is_expired = 0) ORDER BY COALESCE(last_accessed, 0) DESC, id DESC"
+      format!(
+        "SELECT id, contents, mime FROM clipboard WHERE (is_expired IS NULL \
+         OR is_expired = 0) ORDER BY COALESCE(last_accessed, 0) {order}, id \
+         {order}"
+      )
     };
     let mut stmt = self
       .conn
-      .prepare(query)
+      .prepare(&query)
       .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
     let mut rows = stmt
       .query([])
@@ -594,17 +605,24 @@ impl ClipboardDb for SqliteClipboardDb {
     mut out: impl Write,
     preview_width: u32,
     include_expired: bool,
+    reverse: bool,
   ) -> Result<usize, StashError> {
+    let order = if reverse { "ASC" } else { "DESC" };
     let query = if include_expired {
-      "SELECT id, contents, mime FROM clipboard ORDER BY \
-       COALESCE(last_accessed, 0) DESC, id DESC"
+      format!(
+        "SELECT id, contents, mime FROM clipboard ORDER BY \
+         COALESCE(last_accessed, 0) {order}, id {order}"
+      )
     } else {
-      "SELECT id, contents, mime FROM clipboard WHERE (is_expired IS NULL OR \
-       is_expired = 0) ORDER BY COALESCE(last_accessed, 0) DESC, id DESC"
+      format!(
+        "SELECT id, contents, mime FROM clipboard WHERE (is_expired IS NULL \
+         OR is_expired = 0) ORDER BY COALESCE(last_accessed, 0) {order}, id \
+         {order}"
+      )
     };
     let mut stmt = self
       .conn
-      .prepare(query)
+      .prepare(&query)
       .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
     let mut rows = stmt
       .query([])
@@ -818,38 +836,48 @@ impl SqliteClipboardDb {
     limit: usize,
     preview_width: u32,
     search: Option<&str>,
+    reverse: bool,
   ) -> Result<Vec<(i64, String, String)>, StashError> {
     let search_pattern = search.map(|s| {
       let escaped = s.replace('!', "!!").replace('%', "!%").replace('_', "!_");
       format!("%{escaped}%")
     });
 
+    let order = if reverse { "ASC" } else { "DESC" };
     let query = match (include_expired, search_pattern.as_deref()) {
       (true, None) => {
-        "SELECT id, contents, mime FROM clipboard ORDER BY \
-         COALESCE(last_accessed, 0) DESC, id DESC LIMIT ?1 OFFSET ?2"
+        format!(
+          "SELECT id, contents, mime FROM clipboard ORDER BY \
+           COALESCE(last_accessed, 0) {order}, id {order} LIMIT ?1 OFFSET ?2"
+        )
       },
       (true, Some(_)) => {
-        "SELECT id, contents, mime FROM clipboard WHERE (LOWER(CAST(contents \
-         AS TEXT)) LIKE LOWER(?3) ESCAPE '!') ORDER BY COALESCE(last_accessed, \
-         0) DESC, id DESC LIMIT ?1 OFFSET ?2"
+        format!(
+          "SELECT id, contents, mime FROM clipboard WHERE \
+           (LOWER(CAST(contents AS TEXT)) LIKE LOWER(?3) ESCAPE '!') ORDER BY \
+           COALESCE(last_accessed, 0) {order}, id {order} LIMIT ?1 OFFSET ?2"
+        )
       },
       (false, None) => {
-        "SELECT id, contents, mime FROM clipboard WHERE (is_expired IS NULL OR \
-         is_expired = 0) ORDER BY COALESCE(last_accessed, 0) DESC, id DESC \
-         LIMIT ?1 OFFSET ?2"
+        format!(
+          "SELECT id, contents, mime FROM clipboard WHERE (is_expired IS NULL \
+           OR is_expired = 0) ORDER BY COALESCE(last_accessed, 0) {order}, id \
+           {order} LIMIT ?1 OFFSET ?2"
+        )
       },
       (false, Some(_)) => {
-        "SELECT id, contents, mime FROM clipboard WHERE (is_expired IS NULL OR \
-         is_expired = 0) AND (LOWER(CAST(contents AS TEXT)) LIKE LOWER(?3) \
-         ESCAPE '!') ORDER BY COALESCE(last_accessed, 0) DESC, id DESC LIMIT \
-         ?1 OFFSET ?2"
+        format!(
+          "SELECT id, contents, mime FROM clipboard WHERE (is_expired IS NULL \
+           OR is_expired = 0) AND (LOWER(CAST(contents AS TEXT)) LIKE \
+           LOWER(?3) ESCAPE '!') ORDER BY COALESCE(last_accessed, 0) {order}, \
+           id {order} LIMIT ?1 OFFSET ?2"
+        )
       },
     };
 
     let mut stmt = self
       .conn
-      .prepare(query)
+      .prepare(&query)
       .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
 
     let mut rows = if let Some(pattern) = search_pattern.as_deref() {

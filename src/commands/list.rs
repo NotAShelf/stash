@@ -11,6 +11,7 @@ pub trait ListCommand {
     out: impl Write,
     preview_width: u32,
     include_expired: bool,
+    reverse: bool,
   ) -> Result<(), StashError>;
 }
 
@@ -20,9 +21,10 @@ impl ListCommand for SqliteClipboardDb {
     out: impl Write,
     preview_width: u32,
     include_expired: bool,
+    reverse: bool,
   ) -> Result<(), StashError> {
     self
-      .list_entries(out, preview_width, include_expired)
+      .list_entries(out, preview_width, include_expired, reverse)
       .map(|_| ())
   }
 }
@@ -52,6 +54,9 @@ struct TuiState {
 
   /// Whether we're currently in search input mode.
   search_mode: bool,
+
+  /// Whether to show entries in reverse order (oldest first).
+  reverse: bool,
 }
 
 impl TuiState {
@@ -61,6 +66,7 @@ impl TuiState {
     include_expired: bool,
     window_size: usize,
     preview_width: u32,
+    reverse: bool,
   ) -> Result<Self, StashError> {
     let total = db.count_entries(include_expired, None)?;
     let window = if total > 0 {
@@ -70,6 +76,7 @@ impl TuiState {
         window_size,
         preview_width,
         None,
+        reverse,
       )?
     } else {
       Vec::new()
@@ -83,6 +90,7 @@ impl TuiState {
       dirty: false,
       search_query: String::new(),
       search_mode: false,
+      reverse,
     })
   }
 
@@ -228,6 +236,7 @@ impl TuiState {
         self.window_size,
         preview_width,
         search,
+        self.reverse,
       )?
     } else {
       Vec::new()
@@ -266,6 +275,7 @@ impl SqliteClipboardDb {
     &self,
     preview_width: u32,
     include_expired: bool,
+    reverse: bool,
   ) -> Result<(), StashError> {
     use std::io::stdout;
 
@@ -316,8 +326,13 @@ impl SqliteClipboardDb {
       .unwrap_or(24);
     let initial_height = initial_height.max(1);
 
-    let mut tui =
-      TuiState::new(self, include_expired, initial_height, preview_width)?;
+    let mut tui = TuiState::new(
+      self,
+      include_expired,
+      initial_height,
+      preview_width,
+      reverse,
+    )?;
 
     // ratatui ListState; only tracks selection within the *window* slice.
     let mut list_state = ListState::default();
