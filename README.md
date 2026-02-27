@@ -46,7 +46,8 @@ with many features such as but not necessarily limited to:
 - Image preview (shows dimensions and format)
 - Text previews with customizable width
 - De-duplication, whitespace prevention and entry limit control
-- Automatic clipboard monitoring with `stash watch`
+- Automatic clipboard monitoring with
+  [`stash watch`](#watch-clipboard-for-changes-and-store-automatically)
   - Configurable auto-expiry of old entries in watch mode as a safety buffer
 - Drop-in replacement for `wl-clipboard` tools (`wl-copy` and `wl-paste`)
 - Sensitive clipboard filtering via regex (see below)
@@ -70,9 +71,9 @@ features, or conveniences provided by Stash.
 
 ### With Nix
 
-Nix is the recommended way of downloading Stash. You can install it using Nix
-flakes using `nix profile add` if on non-nixos or add Stash as a flake input if
-you are on NixOS.
+Nix is the recommended way of downloading (and developing!) Stash. You can
+install it using Nix flakes using `nix profile add` if on non-nixos or add Stash
+as a flake input if you are on NixOS.
 
 ```nix
 {
@@ -103,7 +104,8 @@ If you want to give Stash a try before you switch to it, you may also run it one
 time with `nix run`.
 
 ```sh
-nix run github:NotAShelf/stash -- watch # start the watch daemon
+# Run directly from the git repository; will be garbage collected
+$ nix run github:NotAShelf/stash -- watch # start the watch daemon
 ```
 
 ### Without Nix
@@ -122,16 +124,23 @@ releases are made when a version gets tagged, and are available under
 - Build and install from source with Cargo:
 
   ```bash
-  cargo install --git https://github.com/notashelf/stash
+  cargo install stash --locked
   ```
+
+Additionally, you may get Stash from source via `cargo install` using
+`cargo install --git https://github.com/notashelf/stash --locked` or you may
+check out to the repository, and use Cargo to build it. You'll need Rust 1.91.0
+or above. Most distributions should package this version already. You may, of
+course, prefer to package the built releases if you'd like.
 
 ## Usage
 
-> [!NOTE]
+> [!IMPORTANT]
 > It is not a priority to provide 1:1 backwards compatibility with Cliphist.
-> While the interface is _almost_ identical, Stash chooses to build upon
+> While the interface is generally similar, Stash chooses to build upon
 > Cliphist's design and extend existing design choices. See
-> [Migrating from Cliphist](#migrating-from-cliphist) for more details.
+> [Migrating from Cliphist](#migrating-from-cliphist) for more details. Refer to
+> help text if confused.
 
 The command interface of Stash is _only slightly_ different from Cliphist. In
 most cases, you may simply replace `cliphist` with `stash` and your commands,
@@ -287,7 +296,7 @@ entry has expired from history.
 > This behavior only applies when the watch daemon is actively running. Manual
 > expiration or deletion of entries will not clear the clipboard.
 
-### MIME Type Preference for Watch
+#### MIME Type Preference for Watch
 
 `stash watch` supports a `--mime-type` (short `-t`) option that lets you
 prioritise which MIME type the daemon should request from the clipboard when
