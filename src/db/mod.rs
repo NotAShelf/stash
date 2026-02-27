@@ -10,7 +10,8 @@ use std::{
 };
 
 use base64::prelude::*;
-use log::{debug, error, warn};
+use log::{debug, error, info, warn};
+use mime_sniffer::MimeTypeSniffer;
 use regex::Regex;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -1065,26 +1066,14 @@ pub fn preview_entry(data: &[u8], mime: Option<&str>, width: u32) -> String {
     }
   }
 
-  // For non-text data, use lossy conversion
-  let s = String::from_utf8_lossy(data);
-  truncate(s.trim(), width as usize, "…")
-}
-
-pub fn truncate(s: &str, max: usize, ellip: &str) -> String {
-  let char_count = s.chars().count();
-  if char_count > max {
-    let mut result = String::with_capacity(max * 4 + ellip.len()); // UTF-8 worst case
-    let mut char_iter = s.chars();
-    for _ in 0..max {
-      if let Some(c) = char_iter.next() {
-        result.push(c);
-      }
-    }
-    result.push_str(ellip);
-    result
-  } else {
-    s.to_string()
+  // For non-text/non-image data, try to sniff the MIME type
+  if let Some(sniffed) = data.sniff_mime_type() {
+    return format!("[[ binary data {} {} ]]", size_str(data.len()), sniffed);
   }
+
+  // Shouldn't reach here if MIME is properly set, but just in case
+  info!("Mimetype sniffing failed, omitting");
+  format!("[[ binary data {} ]]", size_str(data.len()))
 }
 
 pub fn size_str(size: usize) -> String {
@@ -1961,6 +1950,15 @@ mod tests {
     assert_eq!(size_str(512), "512 B");
     assert_eq!(size_str(1024), "1 KiB");
     assert_eq!(size_str(1024 * 1024), "1 MiB");
+  }
+
+  #[test]
+  fn test_preview_entry_binary_sniffed() {
+    // PDF magic bytes
+    let data = b"%PDF-1.4 fake pdf content here for testing";
+    let preview = preview_entry(data, None, 100);
+    assert!(preview.contains("binary data"));
+    assert!(preview.contains("application/pdf"));
   }
 
   #[test]
