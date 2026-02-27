@@ -28,7 +28,7 @@
 <div align="center">
   <br/>
   <a href="#features">Features</a><br/>
-  <a href="#installation">Installation</a> | <a href="#usage">Usage</a> | <a href="#usage">Motivation</a>
+  <a href="#installation">Installation</a> | <a href="#usage">Usage</a> | <a href="#usage">Motivation</a></br>
   <a href="#tips--tricks">Tips and Tricks</a>
   <br/>
 </div>
@@ -52,7 +52,19 @@ with many features such as but not necessarily limited to:
 - Sensitive clipboard filtering via regex (see below)
 - Sensitive clipboard filtering by application (see below)
 
-See [usage section](#usage) for more details.
+on top of the existing features of Cliphist, which are as follows:
+
+- Write clipboard changes to a history file.
+- Recall history with dmenu, rofi, wofi (or whatever other picker you like).
+- Both text and images are supported.
+- Clipboard is preserved byte-for-byte.
+  - Leading/trailing whitespace, no whitespace, or newlines are preserved.
+  - Won’t break fancy editor selections like Vim wordwise, linewise, or block
+    mode.
+
+Most of Stash's usage is documented in the [usage section](#usage) for more
+details. Refer to the [Tips & Tricks section](#tips--tricks) for more "advanced"
+features, or conveniences provided by Stash.
 
 ## Installation
 
@@ -554,7 +566,8 @@ your database:
   reclaim space and defragment the database. This is safe to run periodically.
 
 It is recommended to run `stash db vacuum` occasionally (e.g., monthly) to keep
-the database compact, especially after deleting many entries.
+the database compact, especially after deleting many entries. You can, of
+course, wipe the database entirely if it has grown too large.
 
 ## Attributions
 
