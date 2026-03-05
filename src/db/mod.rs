@@ -1,13 +1,43 @@
 use std::{
-  collections::hash_map::DefaultHasher,
   env,
   fmt,
   fs,
-  hash::{Hash, Hasher},
   io::{BufRead, BufReader, Read, Write},
+  path::PathBuf,
   str,
   sync::OnceLock,
 };
+
+pub mod nonblocking;
+
+/// FNV-1a hasher for deterministic hashing across process runs.
+/// Unlike DefaultHasher (SipHash with random seed), this produces stable
+/// hashes.
+pub struct Fnv1aHasher {
+  state: u64,
+}
+
+impl Fnv1aHasher {
+  const FNV_OFFSET: u64 = 0xCBF29CE484222325;
+  const FNV_PRIME: u64 = 0x100000001B3;
+
+  pub fn new() -> Self {
+    Self {
+      state: Self::FNV_OFFSET,
+    }
+  }
+
+  pub fn write(&mut self, bytes: &[u8]) {
+    for byte in bytes {
+      self.state ^= *byte as u64;
+      self.state = self.state.wrapping_mul(Self::FNV_PRIME);
+    }
+  }
+
+  pub fn finish(&self) -> u64 {
+    self.state
+  }
+}
 
 use base64::prelude::*;
 use log::{debug, error, info, warn};
@@ -210,11 +240,15 @@ impl fmt::Display for Entry {
 }
 
 pub struct SqliteClipboardDb {
-  pub conn: Connection,
+  pub conn:    Connection,
+  pub db_path: PathBuf,
 }
 
 impl SqliteClipboardDb {
-  pub fn new(mut conn: Connection) -> Result<Self, StashError> {
+  pub fn new(
+    mut conn: Connection,
+    db_path: PathBuf,
+  ) -> Result<Self, StashError> {
     conn
       .pragma_update(None, "synchronous", "OFF")
       .map_err(|e| {
@@ -449,7 +483,7 @@ impl SqliteClipboardDb {
     // focused window state.
     #[cfg(feature = "use-toplevel")]
     crate::wayland::init_wayland_state();
-    Ok(Self { conn })
+    Ok(Self { conn, db_path })
   }
 }
 
@@ -535,8 +569,8 @@ impl ClipboardDb for SqliteClipboardDb {
     }
 
     // Calculate content hash for deduplication
-    let mut hasher = DefaultHasher::new();
-    buf.hash(&mut hasher);
+    let mut hasher = Fnv1aHasher::new();
+    hasher.write(&buf);
     #[allow(clippy::cast_possible_wrap)]
     let content_hash = hasher.finish() as i64;
 
@@ -940,20 +974,6 @@ impl SqliteClipboardDb {
       .map_err(|e| StashError::Trim(e.to_string().into()))
   }
 
-  /// Get the earliest expiration (timestamp, id) for heap initialization
-  pub fn get_next_expiration(&self) -> Result<Option<(f64, i64)>, StashError> {
-    match self.conn.query_row(
-      "SELECT expires_at, id FROM clipboard WHERE expires_at IS NOT NULL \
-       ORDER BY expires_at ASC LIMIT 1",
-      [],
-      |row| Ok((row.get(0)?, row.get(1)?)),
-    ) {
-      Ok(result) => Ok(Some(result)),
-      Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-      Err(e) => Err(StashError::Store(e.to_string().into())),
-    }
-  }
-
   /// Set expiration timestamp for an entry
   pub fn set_expiration(
     &self,
@@ -1338,7 +1358,8 @@ mod tests {
   fn test_db() -> SqliteClipboardDb {
     let conn =
       Connection::open_in_memory().expect("Failed to open in-memory db");
-    SqliteClipboardDb::new(conn).expect("Failed to create test database")
+    SqliteClipboardDb::new(conn, PathBuf::from(":memory:"))
+      .expect("Failed to create test database")
   }
 
   fn get_schema_version(conn: &Connection) -> rusqlite::Result<i64> {
@@ -1369,7 +1390,8 @@ mod tests {
     let db_path = temp_dir.path().join("test_fresh.db");
     let conn = Connection::open(&db_path).expect("Failed to open database");
 
-    let db = SqliteClipboardDb::new(conn).expect("Failed to create database");
+    let db = SqliteClipboardDb::new(conn, PathBuf::from(":memory:"))
+      .expect("Failed to create database");
 
     assert_eq!(
       get_schema_version(&db.conn).expect("Failed to get schema version"),
@@ -1419,7 +1441,8 @@ mod tests {
 
     assert_eq!(get_schema_version(&conn).expect("Failed to get version"), 0);
 
-    let db = SqliteClipboardDb::new(conn).expect("Failed to create database");
+    let db = SqliteClipboardDb::new(conn, PathBuf::from(":memory:"))
+      .expect("Failed to create database");
 
     assert_eq!(
       get_schema_version(&db.conn)
@@ -1461,7 +1484,8 @@ mod tests {
       )
       .expect("Failed to insert data");
 
-    let db = SqliteClipboardDb::new(conn).expect("Failed to create database");
+    let db = SqliteClipboardDb::new(conn, PathBuf::from(":memory:"))
+      .expect("Failed to create database");
 
     assert_eq!(
       get_schema_version(&db.conn)
@@ -1504,7 +1528,8 @@ mod tests {
       )
       .expect("Failed to insert data");
 
-    let db = SqliteClipboardDb::new(conn).expect("Failed to create database");
+    let db = SqliteClipboardDb::new(conn, PathBuf::from(":memory:"))
+      .expect("Failed to create database");
 
     assert_eq!(
       get_schema_version(&db.conn)
@@ -1535,12 +1560,13 @@ mod tests {
       )
       .expect("Failed to create table");
 
-    let db = SqliteClipboardDb::new(conn).expect("Failed to create database");
+    let db = SqliteClipboardDb::new(conn, PathBuf::from(":memory:"))
+      .expect("Failed to create database");
     let version_after_first =
       get_schema_version(&db.conn).expect("Failed to get version");
 
-    let db2 =
-      SqliteClipboardDb::new(db.conn).expect("Failed to create database again");
+    let db2 = SqliteClipboardDb::new(db.conn, db.db_path)
+      .expect("Failed to create database again");
     let version_after_second =
       get_schema_version(&db2.conn).expect("Failed to get version");
 
@@ -1553,7 +1579,8 @@ mod tests {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let db_path = temp_dir.path().join("test_store.db");
     let conn = Connection::open(&db_path).expect("Failed to open database");
-    let db = SqliteClipboardDb::new(conn).expect("Failed to create database");
+    let db = SqliteClipboardDb::new(conn, PathBuf::from(":memory:"))
+      .expect("Failed to create database");
 
     let test_data = b"Hello, World!";
     let cursor = std::io::Cursor::new(test_data.to_vec());
@@ -1589,7 +1616,8 @@ mod tests {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let db_path = temp_dir.path().join("test_copy.db");
     let conn = Connection::open(&db_path).expect("Failed to open database");
-    let db = SqliteClipboardDb::new(conn).expect("Failed to create database");
+    let db = SqliteClipboardDb::new(conn, PathBuf::from(":memory:"))
+      .expect("Failed to create database");
 
     let test_data = b"Test content for copy";
     let cursor = std::io::Cursor::new(test_data.to_vec());
@@ -1608,8 +1636,8 @@ mod tests {
 
     std::thread::sleep(std::time::Duration::from_millis(1100));
 
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    test_data.hash(&mut hasher);
+    let mut hasher = Fnv1aHasher::new();
+    hasher.write(test_data);
     let content_hash = hasher.finish() as i64;
 
     let now = std::time::SystemTime::now()
@@ -1670,7 +1698,8 @@ mod tests {
       )
       .expect("Failed to insert data");
 
-    let db = SqliteClipboardDb::new(conn).expect("Failed to create database");
+    let db = SqliteClipboardDb::new(conn, PathBuf::from(":memory:"))
+      .expect("Failed to create database");
 
     assert_eq!(
       get_schema_version(&db.conn).expect("Failed to get version"),

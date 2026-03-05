@@ -228,7 +228,7 @@ fn main() -> color_eyre::eyre::Result<()> {
     }
 
     let conn = rusqlite::Connection::open(&db_path)?;
-    let db = db::SqliteClipboardDb::new(conn)?;
+    let db = db::SqliteClipboardDb::new(conn, db_path)?;
 
     match cli.command {
       Some(Command::Store) => {
@@ -476,7 +476,8 @@ fn main() -> color_eyre::eyre::Result<()> {
           &mime_type,
           cli.min_size,
           cli.max_size,
-        );
+        )
+        .await;
       },
 
       None => {
