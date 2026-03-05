@@ -363,6 +363,8 @@ impl WatchCommand for SqliteClipboardDb {
             if last_hash != Some(current_hash) {
               // Clone buf for the async operation since it needs 'static
               let buf_clone = buf.clone();
+              #[allow(clippy::cast_possible_wrap)]
+              let content_hash = Some(current_hash as i64);
               match async_db
                 .store_entry(
                   buf_clone,
@@ -371,6 +373,7 @@ impl WatchCommand for SqliteClipboardDb {
                   Some(excluded_apps.to_vec()),
                   min_size,
                   max_size,
+                  content_hash,
                 )
                 .await
               {
@@ -433,7 +436,7 @@ impl WatchCommand for SqliteClipboardDb {
   }
 }
 
-/// Unit-testable helper: given ordered offers and a preference, return the
+/// Given ordered offers and a preference, return the
 /// chosen MIME type. This mirrors the selection logic in
 /// [`negotiate_mime_type`] without requiring a Wayland connection.
 #[cfg(test)]

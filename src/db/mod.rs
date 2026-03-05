@@ -5,10 +5,66 @@ use std::{
   io::{BufRead, BufReader, Read, Write},
   path::PathBuf,
   str,
-  sync::OnceLock,
+  sync::{Mutex, OnceLock},
+  time::{Duration, Instant},
 };
 
 pub mod nonblocking;
+
+/// Cache for process scanning results to avoid expensive `/proc` reads on every
+/// store operation. TTL of 5 seconds balances freshness with performance.
+struct ProcessCache {
+  last_scan:    Instant,
+  excluded_app: Option<String>,
+}
+
+impl ProcessCache {
+  const TTL: Duration = Duration::from_secs(5);
+
+  /// Check cache for recently active excluded app.
+  /// Only caches positive results (when an excluded app IS found).
+  /// Negative results (no excluded apps) are never cached to ensure
+  /// we don't miss exclusions when users switch apps.
+  fn get(excluded_apps: &[String]) -> Option<String> {
+    static CACHE: OnceLock<Mutex<ProcessCache>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| {
+      Mutex::new(ProcessCache {
+        last_scan:    Instant::now() - Self::TTL, /* Expire immediately on
+                                                   * first use */
+        excluded_app: None,
+      })
+    });
+
+    if let Ok(mut cache) = cache.lock() {
+      // Check if we have a valid cached positive result
+      if cache.last_scan.elapsed() < Self::TTL
+        && let Some(ref app) = cache.excluded_app
+      {
+        // Verify the cached app is still in the exclusion list
+        if app_matches_exclusion(app, excluded_apps) {
+          return Some(app.clone());
+        }
+      }
+
+      // No valid cache, scan and only cache positive results
+      let result = get_recently_active_excluded_app_uncached(excluded_apps);
+      if result.is_some() {
+        cache.last_scan = Instant::now();
+        cache.excluded_app = result.clone();
+      } else {
+        // Don't cache negative results. We expire cache immediately so next
+        // call will rescan. This ensures we don't miss exclusions when user
+        // switches from non-excluded to excluded app.
+        cache.last_scan = Instant::now() - Self::TTL;
+        cache.excluded_app = None;
+      }
+      result
+    } else {
+      // Lock poisoned - fall back to uncached
+      get_recently_active_excluded_app_uncached(excluded_apps)
+    }
+  }
+}
 
 /// FNV-1a hasher for deterministic hashing across process runs.
 /// Unlike DefaultHasher (SipHash with random seed), this produces stable
@@ -187,6 +243,18 @@ pub enum StashError {
 }
 
 pub trait ClipboardDb {
+  /// Store a new clipboard entry.
+  ///
+  /// # Arguments
+  /// * `input` - Reader for the clipboard content
+  /// * `max_dedupe_search` - Maximum number of recent entries to check for
+  ///   duplicates
+  /// * `max_items` - Maximum total entries to keep in database
+  /// * `excluded_apps` - List of app names to exclude
+  /// * `min_size` - Minimum content size (None for no minimum)
+  /// * `max_size` - Maximum content size
+  /// * `content_hash` - Optional pre-computed content hash (avoids re-hashing)
+  #[allow(clippy::too_many_arguments)]
   fn store_entry(
     &self,
     input: impl Read,
@@ -195,6 +263,7 @@ pub trait ClipboardDb {
     excluded_apps: Option<&[String]>,
     min_size: Option<usize>,
     max_size: usize,
+    content_hash: Option<i64>,
   ) -> Result<i64, StashError>;
 
   fn deduplicate_by_hash(
@@ -308,8 +377,8 @@ impl SqliteClipboardDb {
       })?;
     }
 
-    // Add content_hash column if it doesn't exist
-    // Migration MUST be done to avoid breaking existing installations.
+    // Add content_hash column if it doesn't exist. Migration MUST be done to
+    // avoid breaking existing installations.
     if schema_version < 2 {
       let has_content_hash: bool = tx
         .query_row(
@@ -546,6 +615,7 @@ impl ClipboardDb for SqliteClipboardDb {
     excluded_apps: Option<&[String]>,
     min_size: Option<usize>,
     max_size: usize,
+    content_hash: Option<i64>,
   ) -> Result<i64, StashError> {
     let mut buf = Vec::new();
     if input.read_to_end(&mut buf).is_err() || buf.is_empty() {
@@ -568,11 +638,14 @@ impl ClipboardDb for SqliteClipboardDb {
       return Err(StashError::AllWhitespace);
     }
 
-    // Calculate content hash for deduplication
-    let mut hasher = Fnv1aHasher::new();
-    hasher.write(&buf);
-    #[allow(clippy::cast_possible_wrap)]
-    let content_hash = hasher.finish() as i64;
+    // Use pre-computed hash if provided, otherwise calculate it
+    let content_hash = content_hash.unwrap_or_else(|| {
+      let mut hasher = Fnv1aHasher::new();
+      hasher.write(&buf);
+      #[allow(clippy::cast_possible_wrap)]
+      let hash = hasher.finish() as i64;
+      hash
+    });
 
     let mime = crate::mime::detect_mime(&buf);
 
@@ -1181,7 +1254,8 @@ fn detect_excluded_app_activity(excluded_apps: &[String]) -> bool {
   }
 
   // Strategy 2: Check recently active processes (timing correlation)
-  if let Some(active_app) = get_recently_active_excluded_app(excluded_apps) {
+  // Use cached results to avoid expensive /proc scanning
+  if let Some(active_app) = ProcessCache::get(excluded_apps) {
     debug!("Clipboard excluded: recent activity from {active_app}");
     return true;
   }
@@ -1212,7 +1286,8 @@ fn get_focused_window_app() -> Option<String> {
 }
 
 /// Check for recently active excluded apps using CPU and I/O activity.
-fn get_recently_active_excluded_app(
+/// This is the uncached version - use `ProcessCache::get()` for cached access.
+fn get_recently_active_excluded_app_uncached(
   excluded_apps: &[String],
 ) -> Option<String> {
   let proc_dir = std::path::Path::new("/proc");
@@ -1586,7 +1661,7 @@ mod tests {
     let cursor = std::io::Cursor::new(test_data.to_vec());
 
     let id = db
-      .store_entry(cursor, 100, 1000, None, None, DEFAULT_MAX_ENTRY_SIZE)
+      .store_entry(cursor, 100, 1000, None, None, DEFAULT_MAX_ENTRY_SIZE, None)
       .expect("Failed to store entry");
 
     let content_hash: Option<i64> = db
@@ -1622,7 +1697,7 @@ mod tests {
     let test_data = b"Test content for copy";
     let cursor = std::io::Cursor::new(test_data.to_vec());
     let id_a = db
-      .store_entry(cursor, 100, 1000, None, None, DEFAULT_MAX_ENTRY_SIZE)
+      .store_entry(cursor, 100, 1000, None, None, DEFAULT_MAX_ENTRY_SIZE, None)
       .expect("Failed to store entry A");
 
     let original_last_accessed: i64 = db
@@ -1725,6 +1800,7 @@ mod tests {
         None,
         None,
         DEFAULT_MAX_ENTRY_SIZE,
+        None,
       )
       .expect("Failed to store URI list");
 
@@ -1758,6 +1834,7 @@ mod tests {
         None,
         None,
         DEFAULT_MAX_ENTRY_SIZE,
+        None,
       )
       .expect("Failed to store image");
 
@@ -1786,6 +1863,7 @@ mod tests {
         None,
         None,
         DEFAULT_MAX_ENTRY_SIZE,
+        None,
       )
       .expect("Failed to store first");
     let _id2 = db
@@ -1796,6 +1874,7 @@ mod tests {
         None,
         None,
         DEFAULT_MAX_ENTRY_SIZE,
+        None,
       )
       .expect("Failed to store second");
 
@@ -1831,6 +1910,7 @@ mod tests {
         None,
         None,
         DEFAULT_MAX_ENTRY_SIZE,
+        None,
       )
       .expect("Failed to store");
     }
@@ -1852,6 +1932,7 @@ mod tests {
       None,
       None,
       DEFAULT_MAX_ENTRY_SIZE,
+      None,
     );
     assert!(matches!(result, Err(StashError::EmptyOrTooLarge)));
   }
@@ -1866,6 +1947,7 @@ mod tests {
       None,
       None,
       DEFAULT_MAX_ENTRY_SIZE,
+      None,
     );
     assert!(matches!(result, Err(StashError::AllWhitespace)));
   }
@@ -1882,6 +1964,7 @@ mod tests {
       None,
       None,
       DEFAULT_MAX_ENTRY_SIZE,
+      None,
     );
     assert!(matches!(result, Err(StashError::TooLarge(5000000))));
   }
@@ -1897,6 +1980,7 @@ mod tests {
         None,
         None,
         DEFAULT_MAX_ENTRY_SIZE,
+        None,
       )
       .expect("Failed to store");
 
@@ -1923,6 +2007,7 @@ mod tests {
       None,
       None,
       DEFAULT_MAX_ENTRY_SIZE,
+      None,
     )
     .expect("Failed to store");
     db.store_entry(
@@ -1932,6 +2017,7 @@ mod tests {
       None,
       None,
       DEFAULT_MAX_ENTRY_SIZE,
+      None,
     )
     .expect("Failed to store");
 
@@ -1959,6 +2045,7 @@ mod tests {
         None,
         None,
         DEFAULT_MAX_ENTRY_SIZE,
+        None,
       )
       .expect("Failed to store");
     }
@@ -2038,6 +2125,7 @@ mod tests {
         None,
         None,
         DEFAULT_MAX_ENTRY_SIZE,
+        None,
       )
       .expect("Failed to store");
 
@@ -2122,6 +2210,7 @@ mod tests {
         None,
         None,
         DEFAULT_MAX_ENTRY_SIZE,
+        None,
       )
       .expect("Failed to store");
 

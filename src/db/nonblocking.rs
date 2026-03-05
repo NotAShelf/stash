@@ -25,6 +25,7 @@ impl AsyncClipboardDb {
     excluded_apps: Option<Vec<String>>,
     min_size: Option<usize>,
     max_size: usize,
+    content_hash: Option<i64>,
   ) -> Result<i64, StashError> {
     let path = self.db_path.clone();
     blocking::unblock(move || {
@@ -36,6 +37,7 @@ impl AsyncClipboardDb {
         excluded_apps.as_deref(),
         min_size,
         max_size,
+        content_hash,
       )
     })
     .await
@@ -170,7 +172,7 @@ mod tests {
       let data = b"async test data";
 
       let id = async_db
-        .store_entry(data.to_vec(), 100, 1000, None, None, 5_000_000)
+        .store_entry(data.to_vec(), 100, 1000, None, None, 5_000_000, None)
         .await
         .expect("Failed to store entry");
 
@@ -199,7 +201,7 @@ mod tests {
       let data = b"expiring entry";
 
       let id = async_db
-        .store_entry(data.to_vec(), 100, 1000, None, None, 5_000_000)
+        .store_entry(data.to_vec(), 100, 1000, None, None, 5_000_000, None)
         .await
         .expect("Failed to store entry");
 
@@ -231,7 +233,7 @@ mod tests {
       let data = b"entry to expire";
 
       let id = async_db
-        .store_entry(data.to_vec(), 100, 1000, None, None, 5_000_000)
+        .store_entry(data.to_vec(), 100, 1000, None, None, 5_000_000, None)
         .await
         .expect("Failed to store entry");
 
@@ -278,12 +280,12 @@ mod tests {
       let data = b"clone test";
 
       let id1 = async_db
-        .store_entry(data.to_vec(), 100, 1000, None, None, 5_000_000)
+        .store_entry(data.to_vec(), 100, 1000, None, None, 5_000_000, None)
         .await
         .expect("Failed with original");
 
       let id2 = cloned
-        .store_entry(data.to_vec(), 100, 1000, None, None, 5_000_000)
+        .store_entry(data.to_vec(), 100, 1000, None, None, 5_000_000, None)
         .await
         .expect("Failed with clone");
 
@@ -302,7 +304,8 @@ mod tests {
           let db = async_db.clone();
           let data = format!("concurrent test {}", i).into_bytes();
           smol::spawn(async move {
-            db.store_entry(data, 100, 1000, None, None, 5_000_000).await
+            db.store_entry(data, 100, 1000, None, None, 5_000_000, None)
+              .await
           })
         })
         .collect();
