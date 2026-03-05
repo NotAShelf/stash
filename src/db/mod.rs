@@ -2047,4 +2047,110 @@ mod tests {
     assert_eq!(contents, data.to_vec());
     assert_eq!(mime, Some("text/plain".to_string()));
   }
+
+  #[test]
+  fn test_fnv1a_hasher_deterministic() {
+    // Same input should produce same hash
+    let data = b"test data";
+
+    let mut hasher1 = Fnv1aHasher::new();
+    hasher1.write(data);
+    let hash1 = hasher1.finish();
+
+    let mut hasher2 = Fnv1aHasher::new();
+    hasher2.write(data);
+    let hash2 = hasher2.finish();
+
+    assert_eq!(hash1, hash2, "FNV-1a should produce deterministic hashes");
+  }
+
+  #[test]
+  fn test_fnv1a_hasher_different_input() {
+    // Different inputs should (almost certainly) produce different hashes
+    let data1 = b"test data 1";
+    let data2 = b"test data 2";
+
+    let mut hasher1 = Fnv1aHasher::new();
+    hasher1.write(data1);
+    let hash1 = hasher1.finish();
+
+    let mut hasher2 = Fnv1aHasher::new();
+    hasher2.write(data2);
+    let hash2 = hasher2.finish();
+
+    assert_ne!(
+      hash1, hash2,
+      "Different data should produce different hashes"
+    );
+  }
+
+  #[test]
+  fn test_fnv1a_hasher_known_values() {
+    // Test against known FNV-1a hash values
+    let mut hasher = Fnv1aHasher::new();
+    hasher.write(b"");
+    assert_eq!(
+      hasher.finish(),
+      0xCBF29CE484222325,
+      "Empty string hash mismatch"
+    );
+
+    let mut hasher = Fnv1aHasher::new();
+    hasher.write(b"a");
+    assert_eq!(
+      hasher.finish(),
+      0xAF63DC4C8601EC8C,
+      "Single byte hash mismatch"
+    );
+
+    let mut hasher = Fnv1aHasher::new();
+    hasher.write(b"hello");
+    assert_eq!(hasher.finish(), 0xA430D84680AABD0B, "Hello hash mismatch");
+  }
+
+  #[test]
+  fn test_fnv1a_hash_stored_in_db() {
+    // Verify hash is stored correctly and can be retrieved
+    let db = test_db();
+    let data = b"test content for hashing";
+
+    let id = db
+      .store_entry(
+        std::io::Cursor::new(data.to_vec()),
+        100,
+        1000,
+        None,
+        None,
+        DEFAULT_MAX_ENTRY_SIZE,
+      )
+      .expect("Failed to store");
+
+    // Retrieve the stored hash
+    let stored_hash: i64 = db
+      .conn
+      .query_row(
+        "SELECT content_hash FROM clipboard WHERE id = ?1",
+        [id],
+        |row| row.get(0),
+      )
+      .expect("Failed to get hash");
+
+    // Calculate hash independently
+    let mut hasher = Fnv1aHasher::new();
+    hasher.write(data);
+    let calculated_hash = hasher.finish() as i64;
+
+    assert_eq!(
+      stored_hash, calculated_hash,
+      "Stored hash should match calculated hash"
+    );
+
+    // Verify round-trip: convert back to u64 and compare
+    let stored_hash_u64 = stored_hash as u64;
+    let calculated_hash_u64 = hasher.finish();
+    assert_eq!(
+      stored_hash_u64, calculated_hash_u64,
+      "Bit pattern should be preserved in i64/u64 conversion"
+    );
+  }
 }
