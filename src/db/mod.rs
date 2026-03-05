@@ -19,6 +19,97 @@ use thiserror::Error;
 
 pub const DEFAULT_MAX_ENTRY_SIZE: usize = 5_000_000;
 
+/// Query builder helper for list operations.
+/// Centralizes WHERE clause and ORDER BY generation to avoid duplication.
+struct ListQueryBuilder {
+  include_expired: bool,
+  reverse:         bool,
+  search_pattern:  Option<String>,
+  limit:           Option<usize>,
+  offset:          Option<usize>,
+}
+
+impl ListQueryBuilder {
+  fn new(include_expired: bool, reverse: bool) -> Self {
+    Self {
+      include_expired,
+      reverse,
+      search_pattern: None,
+      limit: None,
+      offset: None,
+    }
+  }
+
+  fn with_search(mut self, pattern: Option<&str>) -> Self {
+    self.search_pattern = pattern.map(|s| {
+      let escaped = s.replace('!', "!!").replace('%', "!%").replace('_', "!_");
+      format!("%{escaped}%")
+    });
+    self
+  }
+
+  fn with_pagination(mut self, offset: usize, limit: usize) -> Self {
+    self.offset = Some(offset);
+    self.limit = Some(limit);
+    self
+  }
+
+  fn where_clause(&self) -> String {
+    let mut conditions = Vec::new();
+
+    if !self.include_expired {
+      conditions.push("(is_expired IS NULL OR is_expired = 0)");
+    }
+
+    if self.search_pattern.is_some() {
+      conditions
+        .push("(LOWER(CAST(contents AS TEXT)) LIKE LOWER(?1) ESCAPE '!')");
+    }
+
+    if conditions.is_empty() {
+      String::new()
+    } else {
+      format!("WHERE {}", conditions.join(" AND "))
+    }
+  }
+
+  fn order_clause(&self) -> String {
+    let order = if self.reverse { "ASC" } else { "DESC" };
+    format!("ORDER BY COALESCE(last_accessed, 0) {order}, id {order}")
+  }
+
+  fn pagination_clause(&self) -> String {
+    match (self.limit, self.offset) {
+      (Some(limit), Some(offset)) => format!("LIMIT {limit} OFFSET {offset}"),
+      _ => String::new(),
+    }
+  }
+
+  fn select_star_query(&self) -> String {
+    let where_clause = self.where_clause();
+    let order_clause = self.order_clause();
+    let pagination = self.pagination_clause();
+
+    format!(
+      "SELECT id, contents, mime FROM clipboard {where_clause} {order_clause} \
+       {pagination}"
+    )
+    .trim()
+    .to_string()
+  }
+
+  fn count_query(&self) -> String {
+    let where_clause = self.where_clause();
+    format!("SELECT COUNT(*) FROM clipboard {where_clause}")
+      .trim()
+      .to_string()
+  }
+
+  fn search_param(&self) -> Option<&str> {
+    self.search_pattern.as_deref()
+  }
+}
+
 #[derive(Error, Debug)]
 pub enum StashError {
   #[error("Input is empty or too large, skipping store.")]
@@ -368,19 +459,8 @@ impl SqliteClipboardDb {
     include_expired: bool,
     reverse: bool,
   ) -> Result<String, StashError> {
-    let order = if reverse { "ASC" } else { "DESC" };
-    let query = if include_expired {
-      format!(
-        "SELECT id, contents, mime FROM clipboard ORDER BY \
-         COALESCE(last_accessed, 0) {order}, id {order}"
-      )
-    } else {
-      format!(
-        "SELECT id, contents, mime FROM clipboard WHERE (is_expired IS NULL \
-         OR is_expired = 0) ORDER BY COALESCE(last_accessed, 0) {order}, id \
-         {order}"
-      )
-    };
+    let builder = ListQueryBuilder::new(include_expired, reverse);
+    let query = builder.select_star_query();
     let mut stmt = self
       .conn
       .prepare(&query)
@@ -607,19 +687,8 @@ impl ClipboardDb for SqliteClipboardDb {
     include_expired: bool,
     reverse: bool,
   ) -> Result<usize, StashError> {
-    let order = if reverse { "ASC" } else { "DESC" };
-    let query = if include_expired {
-      format!(
-        "SELECT id, contents, mime FROM clipboard ORDER BY \
-         COALESCE(last_accessed, 0) {order}, id {order}"
-      )
-    } else {
-      format!(
-        "SELECT id, contents, mime FROM clipboard WHERE (is_expired IS NULL \
-         OR is_expired = 0) ORDER BY COALESCE(last_accessed, 0) {order}, id \
-         {order}"
-      )
-    };
+    let builder = ListQueryBuilder::new(include_expired, reverse);
+    let query = builder.select_star_query();
     let mut stmt = self
       .conn
       .prepare(&query)
@@ -780,43 +849,14 @@ impl SqliteClipboardDb {
     include_expired: bool,
     search: Option<&str>,
   ) -> Result<usize, StashError> {
-    let search_pattern = search.map(|s| {
-      // Avoid backslash escaping issues
-      let escaped = s.replace('!', "!!").replace('%', "!%").replace('_', "!_");
-      format!("%{escaped}%")
-    });
+    let builder =
+      ListQueryBuilder::new(include_expired, false).with_search(search);
+    let query = builder.count_query();
 
-    let count: i64 = match (include_expired, search_pattern.as_deref()) {
-      (true, None) => {
-        self
-          .conn
-          .query_row("SELECT COUNT(*) FROM clipboard", [], |r| r.get(0))
-      },
-      (true, Some(pattern)) => {
-        self.conn.query_row(
-          "SELECT COUNT(*) FROM clipboard WHERE (LOWER(CAST(contents AS \
-           TEXT)) LIKE LOWER(?1) ESCAPE '!')",
-          [pattern],
-          |r| r.get(0),
-        )
-      },
-      (false, None) => {
-        self.conn.query_row(
-          "SELECT COUNT(*) FROM clipboard WHERE (is_expired IS NULL OR \
-           is_expired = 0)",
-          [],
-          |r| r.get(0),
-        )
-      },
-      (false, Some(pattern)) => {
-        self.conn.query_row(
-          "SELECT COUNT(*) FROM clipboard WHERE (is_expired IS NULL OR \
-           is_expired = 0) AND (LOWER(CAST(contents AS TEXT)) LIKE LOWER(?1) \
-           ESCAPE '!')",
-          [pattern],
-          |r| r.get(0),
-        )
-      },
+    let count: i64 = if let Some(pattern) = builder.search_param() {
+      self.conn.query_row(&query, [pattern], |r| r.get(0))
+    } else {
+      self.conn.query_row(&query, [], |r| r.get(0))
     }
     .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
     Ok(count.max(0) as usize)
@@ -838,55 +878,23 @@ impl SqliteClipboardDb {
     search: Option<&str>,
     reverse: bool,
   ) -> Result<Vec<(i64, String, String)>, StashError> {
-    let search_pattern = search.map(|s| {
-      let escaped = s.replace('!', "!!").replace('%', "!%").replace('_', "!_");
-      format!("%{escaped}%")
-    });
-
-    let order = if reverse { "ASC" } else { "DESC" };
-    let query = match (include_expired, search_pattern.as_deref()) {
-      (true, None) => {
-        format!(
-          "SELECT id, contents, mime FROM clipboard ORDER BY \
-           COALESCE(last_accessed, 0) {order}, id {order} LIMIT ?1 OFFSET ?2"
-        )
-      },
-      (true, Some(_)) => {
-        format!(
-          "SELECT id, contents, mime FROM clipboard WHERE \
-           (LOWER(CAST(contents AS TEXT)) LIKE LOWER(?3) ESCAPE '!') ORDER BY \
-           COALESCE(last_accessed, 0) {order}, id {order} LIMIT ?1 OFFSET ?2"
-        )
-      },
-      (false, None) => {
-        format!(
-          "SELECT id, contents, mime FROM clipboard WHERE (is_expired IS NULL \
-           OR is_expired = 0) ORDER BY COALESCE(last_accessed, 0) {order}, id \
-           {order} LIMIT ?1 OFFSET ?2"
-        )
-      },
-      (false, Some(_)) => {
-        format!(
-          "SELECT id, contents, mime FROM clipboard WHERE (is_expired IS NULL \
-           OR is_expired = 0) AND (LOWER(CAST(contents AS TEXT)) LIKE \
-           LOWER(?3) ESCAPE '!') ORDER BY COALESCE(last_accessed, 0) {order}, \
-           id {order} LIMIT ?1 OFFSET ?2"
-        )
-      },
-    };
+    let builder = ListQueryBuilder::new(include_expired, reverse)
+      .with_search(search)
+      .with_pagination(offset, limit);
+    let query = builder.select_star_query();
 
     let mut stmt = self
       .conn
       .prepare(&query)
       .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
 
-    let mut rows = if let Some(pattern) = search_pattern.as_deref() {
+    let mut rows = if let Some(pattern) = builder.search_param() {
       stmt
-        .query(rusqlite::params![limit as i64, offset as i64, pattern])
+        .query(rusqlite::params![pattern])
         .map_err(|e| StashError::ListDecode(e.to_string().into()))?
     } else {
       stmt
-        .query(rusqlite::params![limit as i64, offset as i64])
+        .query([])
         .map_err(|e| StashError::ListDecode(e.to_string().into()))?
     };
 
