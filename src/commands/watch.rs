@@ -1,7 +1,7 @@
 use std::{collections::BinaryHeap, io::Read, time::Duration};
 
 /// FNV-1a hasher for deterministic hashing across process runs.
-/// Unlike DefaultHasher (SipHash), this produces stable hashes.
+/// Unlike `DefaultHasher` (`SipHash`), this produces stable hashes.
 struct Fnv1aHasher {
   state: u64,
 }
@@ -18,7 +18,7 @@ impl Fnv1aHasher {
 
   fn write(&mut self, bytes: &[u8]) {
     for byte in bytes {
-      self.state ^= *byte as u64;
+      self.state ^= u64::from(*byte);
       self.state = self.state.wrapping_mul(Self::FNV_PRIME);
     }
   }
@@ -82,7 +82,7 @@ impl std::cmp::Ord for Neg {
 }
 
 /// Min-heap for tracking entry expirations with sub-second precision.
-/// Uses Neg wrapper to turn BinaryHeap (max-heap) into min-heap behavior.
+/// Uses Neg wrapper to turn `BinaryHeap` (max-heap) into min-heap behavior.
 #[derive(Debug, Default)]
 struct ExpirationQueue {
   heap: BinaryHeap<(Neg, i64)>,

@@ -360,7 +360,7 @@ fn execute_watch_command(
 
 /// Select the best MIME type from available types when none is specified.
 /// Prefers specific content types (image/*, application/*) over generic
-/// text representations (TEXT, STRING, UTF8_STRING).
+/// text representations (TEXT, STRING, `UTF8_STRING`).
 fn select_best_mime_type(
   types: &std::collections::HashSet<String>,
 ) -> Option<String> {
@@ -421,7 +421,7 @@ fn handle_regular_paste(
   let selected_type = available_types.as_ref().and_then(select_best_mime_type);
 
   let mime_type = if let Some(ref best) = selected_type {
-    log::debug!("Auto-selecting MIME type: {}", best);
+    log::debug!("Auto-selecting MIME type: {best}");
     PasteMimeType::Specific(best)
   } else {
     get_paste_mime_type(args.mime_type.as_deref())
@@ -461,14 +461,14 @@ fn handle_regular_paste(
 
       // Only add newline for text content, not binary data
       // Check if the MIME type indicates text content
-      let is_text_content = if !types.is_empty() {
+      let is_text_content = if types.is_empty() {
+        // If no MIME type, check if content is valid UTF-8
+        std::str::from_utf8(&buf).is_ok()
+      } else {
         types.starts_with("text/")
           || types == "application/json"
           || types == "application/xml"
           || types == "application/x-sh"
-      } else {
-        // If no MIME type, check if content is valid UTF-8
-        std::str::from_utf8(&buf).is_ok()
       };
 
       if !args.no_newline

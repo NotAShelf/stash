@@ -412,7 +412,7 @@ impl SqliteClipboardDb {
               },
               (KeyCode::Enter, _) => actions.copy = true,
               (KeyCode::Char('D'), KeyModifiers::SHIFT) => {
-                actions.delete = true
+                actions.delete = true;
               },
               (KeyCode::Char('/'), _) => actions.toggle_search = true,
               _ => {},
@@ -697,7 +697,7 @@ impl SqliteClipboardDb {
                     let opts = Options::new();
                     let mime_type = match mime {
                       Some(ref m) if m == "text/plain" => MimeType::Text,
-                      Some(ref m) => MimeType::Specific(m.clone().to_owned()),
+                      Some(ref m) => MimeType::Specific(m.clone().clone()),
                       None => MimeType::Text,
                     };
                     let copy_result = opts

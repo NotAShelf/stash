@@ -397,7 +397,7 @@ fn main() -> color_eyre::eyre::Result<()> {
               if expired {
                 match db.cleanup_expired() {
                   Ok(count) => {
-                    log::info!("Wiped {} expired entries", count);
+                    log::info!("Wiped {count} expired entries");
                   },
                   Err(e) => {
                     log::error!("failed to wipe expired entries: {e}");
@@ -421,7 +421,7 @@ fn main() -> color_eyre::eyre::Result<()> {
           DbAction::Stats => {
             match db.stats() {
               Ok(stats) => {
-                println!("{}", stats);
+                println!("{stats}");
               },
               Err(e) => {
                 log::error!("failed to get database stats: {e}");
