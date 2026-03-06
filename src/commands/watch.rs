@@ -1,9 +1,32 @@
-use std::{
-  collections::{BinaryHeap, hash_map::DefaultHasher},
-  hash::{Hash, Hasher},
-  io::Read,
-  time::Duration,
-};
+use std::{collections::BinaryHeap, io::Read, time::Duration};
+
+/// FNV-1a hasher for deterministic hashing across process runs.
+/// Unlike `DefaultHasher` (`SipHash`), this produces stable hashes.
+struct Fnv1aHasher {
+  state: u64,
+}
+
+impl Fnv1aHasher {
+  const FNV_OFFSET: u64 = 0xCBF29CE484222325;
+  const FNV_PRIME: u64 = 0x100000001B3;
+
+  fn new() -> Self {
+    Self {
+      state: Self::FNV_OFFSET,
+    }
+  }
+
+  fn write(&mut self, bytes: &[u8]) {
+    for byte in bytes {
+      self.state ^= u64::from(*byte);
+      self.state = self.state.wrapping_mul(Self::FNV_PRIME);
+    }
+  }
+
+  fn finish(&self) -> u64 {
+    self.state
+  }
+}
 
 use smol::Timer;
 use wl_clipboard_rs::{
@@ -17,7 +40,7 @@ use wl_clipboard_rs::{
   },
 };
 
-use crate::db::{ClipboardDb, SqliteClipboardDb};
+use crate::db::{SqliteClipboardDb, nonblocking::AsyncClipboardDb};
 
 /// Wrapper to provide [`Ord`] implementation for `f64` by negating values.
 /// This allows [`BinaryHeap`], which is a max-heap, to function as a min-heap.
@@ -59,7 +82,7 @@ impl std::cmp::Ord for Neg {
 }
 
 /// Min-heap for tracking entry expirations with sub-second precision.
-/// Uses Neg wrapper to turn BinaryHeap (max-heap) into min-heap behavior.
+/// Uses Neg wrapper to turn `BinaryHeap` (max-heap) into min-heap behavior.
 #[derive(Debug, Default)]
 struct ExpirationQueue {
   heap: BinaryHeap<(Neg, i64)>,
@@ -96,6 +119,16 @@ impl ExpirationQueue {
       }
     }
     expired
+  }
+
+  /// Check if the queue is empty
+  fn is_empty(&self) -> bool {
+    self.heap.is_empty()
+  }
+
+  /// Get the number of entries in the queue
+  fn len(&self) -> usize {
+    self.heap.len()
   }
 }
 
@@ -177,7 +210,7 @@ fn negotiate_mime_type(
 
 #[allow(clippy::too_many_arguments)]
 pub trait WatchCommand {
-  fn watch(
+  async fn watch(
     &self,
     max_dedupe_search: u64,
     max_items: u64,
@@ -190,7 +223,7 @@ pub trait WatchCommand {
 }
 
 impl WatchCommand for SqliteClipboardDb {
-  fn watch(
+  async fn watch(
     &self,
     max_dedupe_search: u64,
     max_items: u64,
@@ -200,211 +233,210 @@ impl WatchCommand for SqliteClipboardDb {
     min_size: Option<usize>,
     max_size: usize,
   ) {
-    smol::block_on(async {
-      log::info!(
-        "Starting clipboard watch daemon with MIME type preference: \
-         {mime_type_preference}"
-      );
+    let async_db = AsyncClipboardDb::new(self.db_path.clone());
+    log::info!(
+      "Starting clipboard watch daemon with MIME type preference: \
+       {mime_type_preference}"
+    );
 
-      // Build expiration queue from existing entries
-      let mut exp_queue = ExpirationQueue::new();
-      if let Ok(Some((expires_at, id))) = self.get_next_expiration() {
-        exp_queue.push(expires_at, id);
-        // Load remaining expirations (exclude already-marked expired entries)
-        let mut stmt = self
-          .conn
-          .prepare(
-            "SELECT expires_at, id FROM clipboard WHERE expires_at IS NOT \
-             NULL AND (is_expired IS NULL OR is_expired = 0) ORDER BY \
-             expires_at ASC",
-          )
-          .ok();
-        if let Some(ref mut stmt) = stmt {
-          let mut rows = stmt.query([]).ok();
-          if let Some(ref mut rows) = rows {
-            while let Ok(Some(row)) = rows.next() {
-              if let (Ok(exp), Ok(row_id)) =
-                (row.get::<_, f64>(0), row.get::<_, i64>(1))
-              {
-                // Skip first entry which is already added
-                if exp_queue
-                  .heap
-                  .iter()
-                  .any(|(_, existing_id)| *existing_id == row_id)
-                {
-                  continue;
-                }
-                exp_queue.push(exp, row_id);
-              }
-            }
-          }
+    // Build expiration queue from existing entries
+    let mut exp_queue = ExpirationQueue::new();
+
+    // Load all expirations from database asynchronously
+    match async_db.load_all_expirations().await {
+      Ok(expirations) => {
+        for (expires_at, id) in expirations {
+          exp_queue.push(expires_at, id);
         }
-      }
-
-      // We use hashes for comparison instead of storing full contents
-      let mut last_hash: Option<u64> = None;
-      let mut buf = Vec::with_capacity(4096);
-
-      // Helper to hash clipboard contents
-      let hash_contents = |data: &[u8]| -> u64 {
-        let mut hasher = DefaultHasher::new();
-        data.hash(&mut hasher);
-        hasher.finish()
-      };
-
-      // Initialize with current clipboard using smart MIME negotiation
-      if let Ok((mut reader, _)) = negotiate_mime_type(mime_type_preference) {
-        buf.clear();
-        if reader.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
-          last_hash = Some(hash_contents(&buf));
+        if !exp_queue.is_empty() {
+          log::info!("Loaded {} expirations from database", exp_queue.len());
         }
+      },
+      Err(e) => {
+        log::warn!("Failed to load expirations: {e}");
+      },
+    }
+
+    // We use hashes for comparison instead of storing full contents
+    let mut last_hash: Option<u64> = None;
+    let mut buf = Vec::with_capacity(4096);
+
+    // Helper to hash clipboard contents using FNV-1a (deterministic across
+    // runs)
+    let hash_contents = |data: &[u8]| -> u64 {
+      let mut hasher = Fnv1aHasher::new();
+      hasher.write(data);
+      hasher.finish()
+    };
+
+    // Initialize with current clipboard using smart MIME negotiation
+    if let Ok((mut reader, _)) = negotiate_mime_type(mime_type_preference) {
+      buf.clear();
+      if reader.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
+        last_hash = Some(hash_contents(&buf));
       }
+    }
 
-      loop {
-        // Process any pending expirations
-        if let Some(next_exp) = exp_queue.peek_next() {
-          let now = SqliteClipboardDb::now();
-          if next_exp <= now {
-            // Expired entries to process
-            let expired_ids = exp_queue.pop_expired(now);
-            for id in expired_ids {
-              // Verify entry still exists and get its content_hash
-              let expired_hash: Option<i64> = self
-                .conn
-                .query_row(
-                  "SELECT content_hash FROM clipboard WHERE id = ?1",
-                  [id],
-                  |row| row.get(0),
-                )
-                .ok();
+    let poll_interval = Duration::from_millis(500);
 
-              if let Some(stored_hash) = expired_hash {
-                // Mark as expired
-                self
-                  .conn
-                  .execute(
-                    "UPDATE clipboard SET is_expired = 1 WHERE id = ?1",
-                    [id],
-                  )
-                  .ok();
+    loop {
+      // Process any pending expirations that are due now
+      if let Some(next_exp) = exp_queue.peek_next() {
+        let now = SqliteClipboardDb::now();
+        if next_exp <= now {
+          // Expired entries to process
+          let expired_ids = exp_queue.pop_expired(now);
+          for id in expired_ids {
+            // Verify entry still exists and get its content_hash
+            let expired_hash: Option<i64> =
+              match async_db.get_content_hash(id).await {
+                Ok(hash) => hash,
+                Err(e) => {
+                  log::warn!("Failed to get content hash for entry {id}: {e}");
+                  None
+                },
+              };
+
+            if let Some(stored_hash) = expired_hash {
+              // Mark as expired
+              if let Err(e) = async_db.mark_expired(id).await {
+                log::warn!("Failed to mark entry {id} as expired: {e}");
+              } else {
                 log::info!("Entry {id} marked as expired");
+              }
 
-                // Check if this expired entry is currently in the clipboard
-                if let Ok((mut reader, _)) =
-                  negotiate_mime_type(mime_type_preference)
+              // Check if this expired entry is currently in the clipboard
+              if let Ok((mut reader, _)) =
+                negotiate_mime_type(mime_type_preference)
+              {
+                let mut current_buf = Vec::new();
+                if reader.read_to_end(&mut current_buf).is_ok()
+                  && !current_buf.is_empty()
                 {
-                  let mut current_buf = Vec::new();
-                  if reader.read_to_end(&mut current_buf).is_ok()
-                    && !current_buf.is_empty()
-                  {
-                    let current_hash = hash_contents(&current_buf);
-                    // Compare as i64 (database stores as i64)
-                    if current_hash as i64 == stored_hash {
-                      // Clear the clipboard since expired content is still
-                      // there
-                      let mut opts = Options::new();
-                      opts.clipboard(
-                        wl_clipboard_rs::copy::ClipboardType::Regular,
+                  let current_hash = hash_contents(&current_buf);
+                  // Convert stored i64 to u64 for comparison (preserves bit
+                  // pattern)
+                  if current_hash == stored_hash as u64 {
+                    // Clear the clipboard since expired content is still
+                    // there
+                    let mut opts = Options::new();
+                    opts
+                      .clipboard(wl_clipboard_rs::copy::ClipboardType::Regular);
+                    if opts
+                      .copy(
+                        Source::Bytes(Vec::new().into()),
+                        CopyMimeType::Autodetect,
+                      )
+                      .is_ok()
+                    {
+                      log::info!(
+                        "Cleared clipboard containing expired entry {id}"
                       );
-                      if opts
-                        .copy(
-                          Source::Bytes(Vec::new().into()),
-                          CopyMimeType::Autodetect,
-                        )
-                        .is_ok()
-                      {
-                        log::info!(
-                          "Cleared clipboard containing expired entry {id}"
-                        );
-                        last_hash = None; // reset tracked hash
-                      } else {
-                        log::warn!(
-                          "Failed to clear clipboard for expired entry {id}"
-                        );
-                      }
+                      last_hash = None; // reset tracked hash
+                    } else {
+                      log::warn!(
+                        "Failed to clear clipboard for expired entry {id}"
+                      );
                     }
                   }
                 }
               }
             }
-          } else {
-            // Sleep *precisely* until next expiration
-            let sleep_duration = next_exp - now;
-            Timer::after(Duration::from_secs_f64(sleep_duration)).await;
-            continue; // skip normal poll, process expirations first
           }
         }
+      }
 
-        // Normal clipboard polling
-        match negotiate_mime_type(mime_type_preference) {
-          Ok((mut reader, _mime_type)) => {
-            buf.clear();
-            if let Err(e) = reader.read_to_end(&mut buf) {
-              log::error!("Failed to read clipboard contents: {e}");
-              Timer::after(Duration::from_millis(500)).await;
-              continue;
-            }
+      // Normal clipboard polling (always run, even when expirations are
+      // pending)
+      match negotiate_mime_type(mime_type_preference) {
+        Ok((mut reader, _mime_type)) => {
+          buf.clear();
+          if let Err(e) = reader.read_to_end(&mut buf) {
+            log::error!("Failed to read clipboard contents: {e}");
+            Timer::after(Duration::from_millis(500)).await;
+            continue;
+          }
 
-            // Only store if changed and not empty
-            if !buf.is_empty() {
-              let current_hash = hash_contents(&buf);
-              if last_hash != Some(current_hash) {
-                match self.store_entry(
-                  &buf[..],
+          // Only store if changed and not empty
+          if !buf.is_empty() {
+            let current_hash = hash_contents(&buf);
+            if last_hash != Some(current_hash) {
+              // Clone buf for the async operation since it needs 'static
+              let buf_clone = buf.clone();
+              #[allow(clippy::cast_possible_wrap)]
+              let content_hash = Some(current_hash as i64);
+              match async_db
+                .store_entry(
+                  buf_clone,
                   max_dedupe_search,
                   max_items,
-                  Some(excluded_apps),
+                  Some(excluded_apps.to_vec()),
                   min_size,
                   max_size,
-                ) {
-                  Ok(id) => {
-                    log::info!("Stored new clipboard entry (id: {id})");
-                    last_hash = Some(current_hash);
+                  content_hash,
+                )
+                .await
+              {
+                Ok(id) => {
+                  log::info!("Stored new clipboard entry (id: {id})");
+                  last_hash = Some(current_hash);
 
-                    // Set expiration if configured
-                    if let Some(duration) = expire_after {
-                      let expires_at =
-                        SqliteClipboardDb::now() + duration.as_secs_f64();
-                      self.set_expiration(id, expires_at).ok();
+                  // Set expiration if configured
+                  if let Some(duration) = expire_after {
+                    let expires_at =
+                      SqliteClipboardDb::now() + duration.as_secs_f64();
+                    if let Err(e) =
+                      async_db.set_expiration(id, expires_at).await
+                    {
+                      log::warn!(
+                        "Failed to set expiration for entry {id}: {e}"
+                      );
+                    } else {
                       exp_queue.push(expires_at, id);
                     }
-                  },
-                  Err(crate::db::StashError::ExcludedByApp(_)) => {
-                    log::info!("Clipboard entry excluded by app filter");
-                    last_hash = Some(current_hash);
-                  },
-                  Err(crate::db::StashError::Store(ref msg))
-                    if msg.contains("Excluded by app filter") =>
-                  {
-                    log::info!("Clipboard entry excluded by app filter");
-                    last_hash = Some(current_hash);
-                  },
-                  Err(e) => {
-                    log::error!("Failed to store clipboard entry: {e}");
-                    last_hash = Some(current_hash);
-                  },
-                }
+                  }
+                },
+                Err(crate::db::StashError::ExcludedByApp(_)) => {
+                  log::info!("Clipboard entry excluded by app filter");
+                  last_hash = Some(current_hash);
+                },
+                Err(crate::db::StashError::Store(ref msg))
+                  if msg.contains("Excluded by app filter") =>
+                {
+                  log::info!("Clipboard entry excluded by app filter");
+                  last_hash = Some(current_hash);
+                },
+                Err(e) => {
+                  log::error!("Failed to store clipboard entry: {e}");
+                  last_hash = Some(current_hash);
+                },
               }
             }
-          },
-          Err(e) => {
-            let error_msg = e.to_string();
-            if !error_msg.contains("empty") {
-              log::error!("Failed to get clipboard contents: {e}");
-            }
-          },
-        }
-
-        // Normal poll interval (only if no expirations pending)
-        if exp_queue.peek_next().is_none() {
-          Timer::after(Duration::from_millis(500)).await;
-        }
+          }
+        },
+        Err(e) => {
+          let error_msg = e.to_string();
+          if !error_msg.contains("empty") {
+            log::error!("Failed to get clipboard contents: {e}");
+          }
+        },
       }
-    });
+
+      // Calculate sleep time: min of poll interval and time until next
+      // expiration
+      let sleep_duration = if let Some(next_exp) = exp_queue.peek_next() {
+        let now = SqliteClipboardDb::now();
+        let time_to_exp = (next_exp - now).max(0.0);
+        poll_interval.min(Duration::from_secs_f64(time_to_exp))
+      } else {
+        poll_interval
+      };
+      Timer::after(sleep_duration).await;
+    }
   }
 }
 
-/// Unit-testable helper: given ordered offers and a preference, return the
+/// Given ordered offers and a preference, return the
 /// chosen MIME type. This mirrors the selection logic in
 /// [`negotiate_mime_type`] without requiring a Wayland connection.
 #[cfg(test)]

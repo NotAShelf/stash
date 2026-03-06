@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 base64                = "0.22.1"
+blocking              = "1.6.2"
 clap                  = { version = "4.5.60", features = [ "derive", "env" ] }
 clap-verbosity-flag   = "3.0.4"
 color-eyre            = "0.6.5"
@@ -43,6 +44,7 @@ wayland-protocols-wlr = { version = "0.3.10", default-features = false, optional
 wl-clipboard-rs       = "0.9.3"
 
 [dev-dependencies]
+futures  = "0.3.32"
 tempfile = "3.26.0"
 
 [features]

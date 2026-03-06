@@ -57,6 +57,9 @@ struct TuiState {
 
   /// Whether to show entries in reverse order (oldest first).
   reverse: bool,
+
+  /// ID of entry currently being copied.
+  copying_entry: Option<i64>,
 }
 
 impl TuiState {
@@ -91,6 +94,7 @@ impl TuiState {
       search_query: String::new(),
       search_mode: false,
       reverse,
+      copying_entry: None,
     })
   }
 
@@ -408,7 +412,7 @@ impl SqliteClipboardDb {
               },
               (KeyCode::Enter, _) => actions.copy = true,
               (KeyCode::Char('D'), KeyModifiers::SHIFT) => {
-                actions.delete = true
+                actions.delete = true;
               },
               (KeyCode::Char('/'), _) => actions.toggle_search = true,
               _ => {},
@@ -678,42 +682,51 @@ impl SqliteClipboardDb {
             if actions.copy
               && let Some(&(id, ..)) = tui.selected_entry()
             {
-              match self.copy_entry(id) {
-                Ok((new_id, contents, mime)) => {
-                  if new_id != id {
-                    tui.dirty = true;
-                  }
-                  let opts = Options::new();
-                  let mime_type = match mime {
-                    Some(ref m) if m == "text/plain" => MimeType::Text,
-                    Some(ref m) => MimeType::Specific(m.clone().to_owned()),
-                    None => MimeType::Text,
-                  };
-                  let copy_result = opts
-                    .copy(Source::Bytes(contents.clone().into()), mime_type);
-                  match copy_result {
-                    Ok(()) => {
-                      let _ = Notification::new()
-                        .summary("Stash")
-                        .body("Copied entry to clipboard")
-                        .show();
-                    },
-                    Err(e) => {
-                      log::error!("Failed to copy entry to clipboard: {e}");
-                      let _ = Notification::new()
-                        .summary("Stash")
-                        .body(&format!("Failed to copy to clipboard: {e}"))
-                        .show();
-                    },
-                  }
-                },
-                Err(e) => {
-                  log::error!("Failed to fetch entry {id}: {e}");
-                  let _ = Notification::new()
-                    .summary("Stash")
-                    .body(&format!("Failed to fetch entry: {e}"))
-                    .show();
-                },
+              if tui.copying_entry == Some(id) {
+                log::debug!(
+                  "Skipping duplicate copy for entry {id} (already in \
+                   progress)"
+                );
+              } else {
+                tui.copying_entry = Some(id);
+                match self.copy_entry(id) {
+                  Ok((new_id, contents, mime)) => {
+                    if new_id != id {
+                      tui.dirty = true;
+                    }
+                    let opts = Options::new();
+                    let mime_type = match mime {
+                      Some(ref m) if m == "text/plain" => MimeType::Text,
+                      Some(ref m) => MimeType::Specific(m.clone().clone()),
+                      None => MimeType::Text,
+                    };
+                    let copy_result = opts
+                      .copy(Source::Bytes(contents.clone().into()), mime_type);
+                    match copy_result {
+                      Ok(()) => {
+                        let _ = Notification::new()
+                          .summary("Stash")
+                          .body("Copied entry to clipboard")
+                          .show();
+                      },
+                      Err(e) => {
+                        log::error!("Failed to copy entry to clipboard: {e}");
+                        let _ = Notification::new()
+                          .summary("Stash")
+                          .body(&format!("Failed to copy to clipboard: {e}"))
+                          .show();
+                      },
+                    }
+                  },
+                  Err(e) => {
+                    log::error!("Failed to fetch entry {id}: {e}");
+                    let _ = Notification::new()
+                      .summary("Stash")
+                      .body(&format!("Failed to fetch entry: {e}"))
+                      .show();
+                  },
+                }
+                tui.copying_entry = None;
               }
             }
           }
