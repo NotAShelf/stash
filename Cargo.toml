@@ -16,7 +16,7 @@ path = "src/main.rs"
 [dependencies]
 base64                = "0.22.1"
 blocking              = "1.6.2"
-clap                  = { version = "4.5.60", features = [ "derive", "env" ] }
+clap                  = { version = "4.6.0", features = [ "derive", "env" ] }
 clap-verbosity-flag   = "3.0.4"
 color-eyre            = "0.6.5"
 crossterm             = "0.29.0"
