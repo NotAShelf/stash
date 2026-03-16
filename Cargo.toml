@@ -45,7 +45,7 @@ wl-clipboard-rs       = "0.9.3"
 
 [dev-dependencies]
 futures  = "0.3.32"
-tempfile = "3.26.0"
+tempfile = "3.27.0"
 
 [features]
 default       = [ "notifications", "use-toplevel" ]
