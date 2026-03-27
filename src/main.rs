@@ -9,6 +9,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use humantime::parse_duration;
 use inquire::Confirm;
 
+mod clipboard;
 mod commands;
 pub(crate) mod db;
 pub(crate) mod mime;
