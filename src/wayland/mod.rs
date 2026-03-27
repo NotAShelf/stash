@@ -1,8 +1,9 @@
 use std::{
   collections::HashMap,
-  sync::{LazyLock, Mutex},
+  sync::{Arc, LazyLock, Mutex},
 };
 
+use arc_swap::ArcSwapOption;
 use log::debug;
 use wayland_client::{
   Connection as WaylandConnection,
@@ -17,7 +18,7 @@ use wayland_protocols_wlr::foreign_toplevel::v1::client::{
   zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1},
 };
 
-static FOCUSED_APP: Mutex<Option<String>> = Mutex::new(None);
+static FOCUSED_APP: ArcSwapOption<String> = ArcSwapOption::const_empty();
 static TOPLEVEL_APPS: LazyLock<Mutex<HashMap<ObjectId, String>>> =
   LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -32,12 +33,11 @@ pub fn init_wayland_state() {
 
 /// Get the currently focused window application name using Wayland protocols
 pub fn get_focused_window_app() -> Option<String> {
-  // Try Wayland protocol first
-  if let Ok(focused) = FOCUSED_APP.lock()
-    && let Some(ref app) = *focused
-  {
+  // Load the focused app using lock-free arc-swap
+  let focused = FOCUSED_APP.load();
+  if let Some(app) = focused.as_ref() {
     debug!("Found focused app via Wayland protocol: {app}");
-    return Some(app.clone());
+    return Some(app.to_string());
   }
 
   debug!("No focused window detection method worked");
@@ -152,12 +152,11 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for AppState {
         }) {
           debug!("Toplevel activated");
           // Update focused app to the `app_id` of this handle
-          if let (Ok(apps), Ok(mut focused)) =
-            (TOPLEVEL_APPS.lock(), FOCUSED_APP.lock())
+          if let Ok(apps) = TOPLEVEL_APPS.lock()
             && let Some(app_id) = apps.get(&handle_id)
           {
             debug!("Setting focused app to: {app_id}");
-            *focused = Some(app_id.clone());
+            FOCUSED_APP.store(Some(Arc::new(app_id.clone())));
           }
         }
       },
