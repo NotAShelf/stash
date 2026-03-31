@@ -1,3 +1,9 @@
+mod clipboard;
+mod commands;
+mod db;
+mod mime;
+mod multicall;
+
 use std::{
   env,
   io::{self, IsTerminal},
@@ -6,14 +12,14 @@ use std::{
 };
 
 use clap::{CommandFactory, Parser, Subcommand};
+use color_eyre::eyre;
 use humantime::parse_duration;
 use inquire::Confirm;
 
-mod clipboard;
-mod commands;
-pub(crate) mod db;
-pub(crate) mod mime;
-mod multicall;
+// While the module is named "wayland", the Wayland module is *strictly* for the
+// use-toplevel feature as it requires some low-level wayland crates that are
+// not required *by default*. The module is named that way because "toplevel"
+// sounded too silly. Stash is strictly a Wayland clipboard manager.
 #[cfg(feature = "use-toplevel")] mod wayland;
 
 use crate::{
@@ -189,8 +195,20 @@ fn report_error<T>(
   }
 }
 
+fn confirm(prompt: &str) -> bool {
+  Confirm::new(prompt)
+    .with_default(false)
+    .prompt()
+    .unwrap_or_else(|e| {
+      log::error!("Confirmation prompt failed: {e}");
+      false
+    })
+}
+
 #[allow(clippy::too_many_lines)] // whatever
-fn main() -> color_eyre::eyre::Result<()> {
+fn main() -> eyre::Result<()> {
+  color_eyre::install()?;
+
   // Check if we're being called as a multicall binary
   let program_name = env::args().next().map(|s| {
     PathBuf::from(s)
@@ -217,12 +235,18 @@ fn main() -> color_eyre::eyre::Result<()> {
       .filter_level(cli.verbosity.into())
       .init();
 
-    let db_path = cli.db_path.unwrap_or_else(|| {
-      dirs::cache_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("stash")
-        .join("db")
-    });
+    let db_path = match cli.db_path {
+      Some(path) => path,
+      None => {
+        let cache_dir = dirs::cache_dir().ok_or_else(|| {
+          eyre::eyre!(
+            "Could not determine cache directory. Set --db-path or \
+             $STASH_DB_PATH explicitly."
+          )
+        })?;
+        cache_dir.join("stash").join("db")
+      },
+    };
 
     if let Some(parent) = db_path.parent() {
       std::fs::create_dir_all(parent)?;
@@ -300,10 +324,7 @@ fn main() -> color_eyre::eyre::Result<()> {
         let mut should_proceed = true;
         if ask {
           should_proceed =
-            Confirm::new("Are you sure you want to delete clipboard entries?")
-              .with_default(false)
-              .prompt()
-              .unwrap_or(false);
+            confirm("Are you sure you want to delete clipboard entries?");
 
           if !should_proceed {
             log::info!("aborted by user.");
@@ -361,12 +382,8 @@ fn main() -> color_eyre::eyre::Result<()> {
         );
         let mut should_proceed = true;
         if ask {
-          should_proceed = Confirm::new(
-            "Are you sure you want to wipe all clipboard history?",
-          )
-          .with_default(false)
-          .prompt()
-          .unwrap_or(false);
+          should_proceed =
+            confirm("Are you sure you want to wipe all clipboard history?");
           if !should_proceed {
             log::info!("wipe command aborted by user.");
           }
@@ -386,10 +403,7 @@ fn main() -> color_eyre::eyre::Result<()> {
               } else {
                 "Are you sure you want to wipe ALL clipboard history?"
               };
-              should_proceed = Confirm::new(message)
-                .with_default(false)
-                .prompt()
-                .unwrap_or(false);
+              should_proceed = confirm(message);
               if !should_proceed {
                 log::info!("db wipe command aborted by user.");
               }
@@ -398,7 +412,7 @@ fn main() -> color_eyre::eyre::Result<()> {
               if expired {
                 match db.cleanup_expired() {
                   Ok(count) => {
-                    log::info!("Wiped {count} expired entries");
+                    log::info!("wiped {count} expired entries");
                   },
                   Err(e) => {
                     log::error!("failed to wipe expired entries: {e}");
@@ -412,7 +426,7 @@ fn main() -> color_eyre::eyre::Result<()> {
           DbAction::Vacuum => {
             match db.vacuum() {
               Ok(()) => {
-                log::info!("Database optimized successfully");
+                log::info!("database optimized successfully");
               },
               Err(e) => {
                 log::error!("failed to vacuum database: {e}");
@@ -435,13 +449,10 @@ fn main() -> color_eyre::eyre::Result<()> {
       Some(Command::Import { r#type, ask }) => {
         let mut should_proceed = true;
         if ask {
-          should_proceed = Confirm::new(
+          should_proceed = confirm(
             "Are you sure you want to import clipboard data? This may \
              overwrite existing entries.",
-          )
-          .with_default(false)
-          .prompt()
-          .unwrap_or(false);
+          );
           if !should_proceed {
             log::info!("import command aborted by user.");
           }
