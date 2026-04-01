@@ -146,11 +146,12 @@ impl Clone for AsyncClipboardDb {
 
 #[cfg(test)]
 mod tests {
-  use std::collections::HashSet;
+  use std::{collections::HashSet, hash::Hasher};
 
   use tempfile::tempdir;
 
   use super::*;
+  use crate::hash::Fnv1aHasher;
 
   fn setup_test_db() -> (AsyncClipboardDb, tempfile::TempDir) {
     let temp_dir = tempdir().expect("Failed to create temp dir");
@@ -198,7 +199,7 @@ mod tests {
         .expect("Hash should exist");
 
       // Calculate expected hash
-      let mut hasher = crate::db::Fnv1aHasher::new();
+      let mut hasher = Fnv1aHasher::new();
       hasher.write(data);
       let expected_hash = hasher.finish() as i64;
 
