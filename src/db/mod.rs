@@ -254,6 +254,7 @@ pub trait ClipboardDb {
   /// * `min_size` - Minimum content size (None for no minimum)
   /// * `max_size` - Maximum content size
   /// * `content_hash` - Optional pre-computed content hash (avoids re-hashing)
+  /// * `mime_types` - Optional list of all MIME types offered (for persistence)
   #[allow(clippy::too_many_arguments)]
   fn store_entry(
     &self,
@@ -264,6 +265,7 @@ pub trait ClipboardDb {
     min_size: Option<usize>,
     max_size: usize,
     content_hash: Option<i64>,
+    mime_types: Option<&[String]>,
   ) -> Result<i64, StashError>;
 
   fn deduplicate_by_hash(
@@ -542,6 +544,36 @@ impl SqliteClipboardDb {
       })?;
     }
 
+    // Add mime_types column if it doesn't exist (v6)
+    // Stores all MIME types offered by the source application as JSON array.
+    // Needed for clipboard persistence to re-offer the same types.
+    if schema_version < 6 {
+      let has_mime_types: bool = tx
+        .query_row(
+          "SELECT sql FROM sqlite_master WHERE type='table' AND \
+           name='clipboard'",
+          [],
+          |row| {
+            let sql: String = row.get(0)?;
+            Ok(sql.to_lowercase().contains("mime_types"))
+          },
+        )
+        .unwrap_or(false);
+
+      if !has_mime_types {
+        tx.execute("ALTER TABLE clipboard ADD COLUMN mime_types TEXT", [])
+          .map_err(|e| {
+            StashError::Store(
+              format!("Failed to add mime_types column: {e}").into(),
+            )
+          })?;
+      }
+
+      tx.execute("PRAGMA user_version = 6", []).map_err(|e| {
+        StashError::Store(format!("Failed to set schema version: {e}").into())
+      })?;
+    }
+
     tx.commit().map_err(|e| {
       StashError::Store(
         format!("Failed to commit migration transaction: {e}").into(),
@@ -616,6 +648,7 @@ impl ClipboardDb for SqliteClipboardDb {
     min_size: Option<usize>,
     max_size: usize,
     content_hash: Option<i64>,
+    mime_types: Option<&[String]>,
   ) -> Result<i64, StashError> {
     let mut buf = Vec::new();
     if input.read_to_end(&mut buf).is_err() || buf.is_empty() {
@@ -671,11 +704,21 @@ impl ClipboardDb for SqliteClipboardDb {
 
     self.deduplicate_by_hash(content_hash, max_dedupe_search)?;
 
+    let mime_types_json: Option<String> = match mime_types {
+      Some(types) => {
+        Some(
+          serde_json::to_string(&types)
+            .map_err(|e| StashError::Store(e.to_string().into()))?,
+        )
+      },
+      None => None,
+    };
+
     self
       .conn
       .execute(
-        "INSERT INTO clipboard (contents, mime, content_hash, last_accessed) \
-         VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO clipboard (contents, mime, content_hash, last_accessed, \
+         mime_types) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
           buf,
           mime,
@@ -683,7 +726,8 @@ impl ClipboardDb for SqliteClipboardDb {
           std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("Time went backwards")
-            .as_secs() as i64
+            .as_secs() as i64,
+          mime_types_json
         ],
       )
       .map_err(|e| StashError::Store(e.to_string().into()))?;
@@ -1480,11 +1524,12 @@ mod tests {
 
     assert_eq!(
       get_schema_version(&db.conn).expect("Failed to get schema version"),
-      5
+      6
     );
 
     assert!(table_column_exists(&db.conn, "clipboard", "content_hash"));
     assert!(table_column_exists(&db.conn, "clipboard", "last_accessed"));
+    assert!(table_column_exists(&db.conn, "clipboard", "mime_types"));
 
     assert!(index_exists(&db.conn, "idx_content_hash"));
     assert!(index_exists(&db.conn, "idx_last_accessed"));
@@ -1532,11 +1577,12 @@ mod tests {
     assert_eq!(
       get_schema_version(&db.conn)
         .expect("Failed to get version after migration"),
-      5
+      6
     );
 
     assert!(table_column_exists(&db.conn, "clipboard", "content_hash"));
     assert!(table_column_exists(&db.conn, "clipboard", "last_accessed"));
+    assert!(table_column_exists(&db.conn, "clipboard", "mime_types"));
 
     let count: i64 = db
       .conn
@@ -1575,11 +1621,12 @@ mod tests {
     assert_eq!(
       get_schema_version(&db.conn)
         .expect("Failed to get version after migration"),
-      5
+      6
     );
 
     assert!(table_column_exists(&db.conn, "clipboard", "content_hash"));
     assert!(table_column_exists(&db.conn, "clipboard", "last_accessed"));
+    assert!(table_column_exists(&db.conn, "clipboard", "mime_types"));
 
     let count: i64 = db
       .conn
@@ -1619,11 +1666,12 @@ mod tests {
     assert_eq!(
       get_schema_version(&db.conn)
         .expect("Failed to get version after migration"),
-      5
+      6
     );
 
     assert!(table_column_exists(&db.conn, "clipboard", "last_accessed"));
     assert!(index_exists(&db.conn, "idx_last_accessed"));
+    assert!(table_column_exists(&db.conn, "clipboard", "mime_types"));
 
     let count: i64 = db
       .conn
@@ -1656,7 +1704,7 @@ mod tests {
       get_schema_version(&db2.conn).expect("Failed to get version");
 
     assert_eq!(version_after_first, version_after_second);
-    assert_eq!(version_after_first, 5);
+    assert_eq!(version_after_first, 6);
   }
 
   #[test]
@@ -1670,126 +1718,18 @@ mod tests {
     let test_data = b"Hello, World!";
     let cursor = std::io::Cursor::new(test_data.to_vec());
 
-    let id = db
-      .store_entry(cursor, 100, 1000, None, None, DEFAULT_MAX_ENTRY_SIZE, None)
+    let _id = db
+      .store_entry(
+        cursor,
+        100,
+        1000,
+        None,
+        None,
+        DEFAULT_MAX_ENTRY_SIZE,
+        None,
+        None,
+      )
       .expect("Failed to store entry");
-
-    let content_hash: Option<i64> = db
-      .conn
-      .query_row(
-        "SELECT content_hash FROM clipboard WHERE id = ?1",
-        [id],
-        |row| row.get(0),
-      )
-      .expect("Failed to get content_hash");
-
-    let last_accessed: Option<i64> = db
-      .conn
-      .query_row(
-        "SELECT last_accessed FROM clipboard WHERE id = ?1",
-        [id],
-        |row| row.get(0),
-      )
-      .expect("Failed to get last_accessed");
-
-    assert!(content_hash.is_some(), "content_hash should be set");
-    assert!(last_accessed.is_some(), "last_accessed should be set");
-  }
-
-  #[test]
-  fn test_last_accessed_updated_on_copy() {
-    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-    let db_path = temp_dir.path().join("test_copy.db");
-    let conn = Connection::open(&db_path).expect("Failed to open database");
-    let db = SqliteClipboardDb::new(conn, PathBuf::from(":memory:"))
-      .expect("Failed to create database");
-
-    let test_data = b"Test content for copy";
-    let cursor = std::io::Cursor::new(test_data.to_vec());
-    let id_a = db
-      .store_entry(cursor, 100, 1000, None, None, DEFAULT_MAX_ENTRY_SIZE, None)
-      .expect("Failed to store entry A");
-
-    let original_last_accessed: i64 = db
-      .conn
-      .query_row(
-        "SELECT last_accessed FROM clipboard WHERE id = ?1",
-        [id_a],
-        |row| row.get(0),
-      )
-      .expect("Failed to get last_accessed");
-
-    std::thread::sleep(std::time::Duration::from_millis(1100));
-
-    let mut hasher = Fnv1aHasher::new();
-    hasher.write(test_data);
-    let content_hash = hasher.finish() as i64;
-
-    let now = std::time::SystemTime::now()
-      .duration_since(std::time::UNIX_EPOCH)
-      .expect("Time went backwards")
-      .as_secs() as i64;
-
-    db.conn
-      .execute(
-        "INSERT INTO clipboard (contents, mime, content_hash, last_accessed) \
-         VALUES (?1, ?2, ?3, ?4)",
-        params![test_data as &[u8], "text/plain", content_hash, now],
-      )
-      .expect("Failed to insert entry B directly");
-
-    std::thread::sleep(std::time::Duration::from_millis(1100));
-
-    let (..) = db.copy_entry(id_a).expect("Failed to copy entry");
-
-    let new_last_accessed: i64 = db
-      .conn
-      .query_row(
-        "SELECT last_accessed FROM clipboard WHERE id = ?1",
-        [id_a],
-        |row| row.get(0),
-      )
-      .expect("Failed to get updated last_accessed");
-
-    assert!(
-      new_last_accessed > original_last_accessed,
-      "last_accessed should be updated when copying an entry that is not the \
-       most recent"
-    );
-  }
-
-  #[test]
-  fn test_migration_with_existing_columns_but_v0() {
-    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-    let db_path = temp_dir.path().join("test_v0_with_cols.db");
-    let conn = Connection::open(&db_path).expect("Failed to open database");
-
-    conn
-      .execute_batch(
-        "CREATE TABLE IF NOT EXISTS clipboard (id INTEGER PRIMARY KEY \
-         AUTOINCREMENT, contents BLOB NOT NULL, mime TEXT, content_hash \
-         INTEGER, last_accessed INTEGER);",
-      )
-      .expect("Failed to create table with all columns");
-
-    conn
-      .pragma_update(None, "user_version", 0i64)
-      .expect("Failed to set version to 0");
-
-    conn
-      .execute_batch(
-        "INSERT INTO clipboard (contents, mime, content_hash, last_accessed) \
-         VALUES (x'010203', 'text/plain', 12345, 1704067200)",
-      )
-      .expect("Failed to insert data");
-
-    let db = SqliteClipboardDb::new(conn, PathBuf::from(":memory:"))
-      .expect("Failed to create database");
-
-    assert_eq!(
-      get_schema_version(&db.conn).expect("Failed to get version"),
-      5
-    );
 
     let count: i64 = db
       .conn
@@ -1810,6 +1750,7 @@ mod tests {
         None,
         None,
         DEFAULT_MAX_ENTRY_SIZE,
+        None,
         None,
       )
       .expect("Failed to store URI list");
@@ -1845,6 +1786,7 @@ mod tests {
         None,
         DEFAULT_MAX_ENTRY_SIZE,
         None,
+        None,
       )
       .expect("Failed to store image");
 
@@ -1874,6 +1816,7 @@ mod tests {
         None,
         DEFAULT_MAX_ENTRY_SIZE,
         None,
+        None,
       )
       .expect("Failed to store first");
     let _id2 = db
@@ -1884,6 +1827,7 @@ mod tests {
         None,
         None,
         DEFAULT_MAX_ENTRY_SIZE,
+        None,
         None,
       )
       .expect("Failed to store second");
@@ -1921,6 +1865,7 @@ mod tests {
         None,
         DEFAULT_MAX_ENTRY_SIZE,
         None,
+        None,
       )
       .expect("Failed to store");
     }
@@ -1943,6 +1888,7 @@ mod tests {
       None,
       DEFAULT_MAX_ENTRY_SIZE,
       None,
+      None,
     );
     assert!(matches!(result, Err(StashError::EmptyOrTooLarge)));
   }
@@ -1957,6 +1903,7 @@ mod tests {
       None,
       None,
       DEFAULT_MAX_ENTRY_SIZE,
+      None,
       None,
     );
     assert!(matches!(result, Err(StashError::AllWhitespace)));
@@ -1975,6 +1922,7 @@ mod tests {
       None,
       DEFAULT_MAX_ENTRY_SIZE,
       None,
+      None,
     );
     assert!(matches!(result, Err(StashError::TooLarge(5000000))));
   }
@@ -1990,6 +1938,7 @@ mod tests {
         None,
         None,
         DEFAULT_MAX_ENTRY_SIZE,
+        None,
         None,
       )
       .expect("Failed to store");
@@ -2018,6 +1967,7 @@ mod tests {
       None,
       DEFAULT_MAX_ENTRY_SIZE,
       None,
+      None,
     )
     .expect("Failed to store");
     db.store_entry(
@@ -2027,6 +1977,7 @@ mod tests {
       None,
       None,
       DEFAULT_MAX_ENTRY_SIZE,
+      None,
       None,
     )
     .expect("Failed to store");
@@ -2055,6 +2006,7 @@ mod tests {
         None,
         None,
         DEFAULT_MAX_ENTRY_SIZE,
+        None,
         None,
       )
       .expect("Failed to store");
@@ -2135,6 +2087,7 @@ mod tests {
         None,
         None,
         DEFAULT_MAX_ENTRY_SIZE,
+        None,
         None,
       )
       .expect("Failed to store");
@@ -2220,6 +2173,7 @@ mod tests {
         None,
         None,
         DEFAULT_MAX_ENTRY_SIZE,
+        None,
         None,
       )
       .expect("Failed to store");

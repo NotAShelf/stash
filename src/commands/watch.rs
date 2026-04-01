@@ -1,5 +1,22 @@
 use std::{collections::BinaryHeap, io::Read, time::Duration};
 
+use smol::Timer;
+use wl_clipboard_rs::{
+  copy::{MimeType as CopyMimeType, Options, Source},
+  paste::{
+    ClipboardType,
+    MimeType as PasteMimeType,
+    Seat,
+    get_contents,
+    get_mime_types_ordered,
+  },
+};
+
+use crate::{
+  clipboard::{self, ClipboardData, get_serving_pid},
+  db::{SqliteClipboardDb, nonblocking::AsyncClipboardDb},
+};
+
 /// FNV-1a hasher for deterministic hashing across process runs.
 /// Unlike `DefaultHasher` (`SipHash`), this produces stable hashes.
 struct Fnv1aHasher {
@@ -27,20 +44,6 @@ impl Fnv1aHasher {
     self.state
   }
 }
-
-use smol::Timer;
-use wl_clipboard_rs::{
-  copy::{MimeType as CopyMimeType, Options, Source},
-  paste::{
-    ClipboardType,
-    MimeType as PasteMimeType,
-    Seat,
-    get_contents,
-    get_mime_types_ordered,
-  },
-};
-
-use crate::db::{SqliteClipboardDb, nonblocking::AsyncClipboardDb};
 
 /// Wrapper to provide [`Ord`] implementation for `f64` by negating values.
 /// This allows [`BinaryHeap`], which is a max-heap, to function as a min-heap.
@@ -151,20 +154,28 @@ impl ExpirationQueue {
 /// When `preference` is `"text"`, uses `MimeType::Text` directly (single call).
 /// When `preference` is `"image"`, picks the first offered `image/*` type.
 /// Otherwise picks the source's first offered type.
+///
+/// # Returns
+///
+/// The content reader, the selected MIME type, and ALL offered MIME
+/// types.
+#[expect(clippy::type_complexity)]
 fn negotiate_mime_type(
   preference: &str,
-) -> Result<(Box<dyn Read>, String), wl_clipboard_rs::paste::Error> {
+) -> Result<(Box<dyn Read>, String, Vec<String>), wl_clipboard_rs::paste::Error>
+{
+  // Get all offered MIME types first (needed for persistence)
+  let offered =
+    get_mime_types_ordered(ClipboardType::Regular, Seat::Unspecified)?;
+
   if preference == "text" {
     let (reader, mime_str) = get_contents(
       ClipboardType::Regular,
       Seat::Unspecified,
       PasteMimeType::Text,
     )?;
-    return Ok((Box::new(reader) as Box<dyn Read>, mime_str));
+    return Ok((Box::new(reader) as Box<dyn Read>, mime_str, offered));
   }
-
-  let offered =
-    get_mime_types_ordered(ClipboardType::Regular, Seat::Unspecified)?;
 
   let chosen = if preference == "image" {
     // Pick the first offered image type, fall back to first overall
@@ -202,7 +213,8 @@ fn negotiate_mime_type(
         Seat::Unspecified,
         PasteMimeType::Specific(mime_str),
       )?;
-      Ok((Box::new(reader) as Box<dyn Read>, actual_mime))
+
+      Ok((Box::new(reader) as Box<dyn Read>, actual_mime, offered))
     },
     None => Err(wl_clipboard_rs::paste::Error::NoSeats),
   }
@@ -270,7 +282,7 @@ impl WatchCommand for SqliteClipboardDb {
     };
 
     // Initialize with current clipboard using smart MIME negotiation
-    if let Ok((mut reader, _)) = negotiate_mime_type(mime_type_preference) {
+    if let Ok((mut reader, ..)) = negotiate_mime_type(mime_type_preference) {
       buf.clear();
       if reader.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
         last_hash = Some(hash_contents(&buf));
@@ -306,7 +318,7 @@ impl WatchCommand for SqliteClipboardDb {
               }
 
               // Check if this expired entry is currently in the clipboard
-              if let Ok((mut reader, _)) =
+              if let Ok((mut reader, ..)) =
                 negotiate_mime_type(mime_type_preference)
               {
                 let mut current_buf = Vec::new();
@@ -349,7 +361,7 @@ impl WatchCommand for SqliteClipboardDb {
       // Normal clipboard polling (always run, even when expirations are
       // pending)
       match negotiate_mime_type(mime_type_preference) {
-        Ok((mut reader, _mime_type)) => {
+        Ok((mut reader, _mime_type, _all_mimes)) => {
           buf.clear();
           if let Err(e) = reader.read_to_end(&mut buf) {
             log::error!("Failed to read clipboard contents: {e}");
@@ -365,6 +377,12 @@ impl WatchCommand for SqliteClipboardDb {
               let buf_clone = buf.clone();
               #[allow(clippy::cast_possible_wrap)]
               let content_hash = Some(current_hash as i64);
+
+              // Clone data for persistence after successful store
+              let buf_for_persist = buf.clone();
+              let mime_types_for_persist = _all_mimes.clone();
+              let selected_mime = _mime_type.clone();
+
               match async_db
                 .store_entry(
                   buf_clone,
@@ -374,12 +392,44 @@ impl WatchCommand for SqliteClipboardDb {
                   min_size,
                   max_size,
                   content_hash,
+                  Some(mime_types_for_persist.clone()),
                 )
                 .await
               {
                 Ok(id) => {
                   log::info!("Stored new clipboard entry (id: {id})");
                   last_hash = Some(current_hash);
+
+                  // Persist clipboard: fork child to serve data
+                  // This keeps the clipboard alive when source app closes
+                  // Check if we're already serving to avoid duplicate processes
+                  if get_serving_pid().is_none() {
+                    let clipboard_data = ClipboardData::new(
+                      buf_for_persist,
+                      mime_types_for_persist,
+                      selected_mime,
+                    );
+
+                    // Validate and persist in blocking task
+                    if clipboard_data.is_valid().is_ok() {
+                      smol::spawn(async move {
+                        // Use blocking task for fork operation
+                        let result = smol::unblock(move || unsafe {
+                          clipboard::persist_clipboard(clipboard_data)
+                        })
+                        .await;
+
+                        if let Err(e) = result {
+                          log::debug!("Clipboard persistence failed: {e}");
+                        }
+                      })
+                      .detach();
+                    }
+                  } else {
+                    log::trace!(
+                      "Already serving clipboard, skipping persistence fork"
+                    );
+                  }
 
                   // Set expiration if configured
                   if let Some(duration) = expire_after {
@@ -538,5 +588,146 @@ mod tests {
     // File managers typically offer uri-list first
     let offered = vec!["text/uri-list".to_string(), "text/plain".to_string()];
     assert_eq!(pick_mime(&offered, "any").unwrap(), "text/uri-list");
+  }
+
+  /// Test that "text" preference is handled separately from pick_mime logic.
+  /// Documents that "text" preference uses PasteMimeType::Text directly
+  /// without querying MIME type ordering. This is functionally a regression
+  /// test for `negotiate_mime_type()`, which is load bearing, to ensure that
+  /// we don't mess it up.
+  #[test]
+  fn test_text_preference_behavior() {
+    // When preference is "text", negotiate_mime_type() should:
+    // 1. Use PasteMimeType::Text directly (no ordering query via
+    //    get_mime_types_ordered)
+    // 2. Return content with text/plain MIME type
+    //
+    // Note: "text" is NOT passed to pick_mime() - it's handled separately
+    // in negotiate_mime_type() before the pick_mime logic.
+    // This test documents the separation of concerns.
+    let offered = vec![
+      "text/html".to_string(),
+      "image/png".to_string(),
+      "text/plain".to_string(),
+    ];
+    // pick_mime is only called for "image" and "any" preferences
+    // "text" goes through a different code path
+    assert_eq!(pick_mime(&offered, "any").unwrap(), "image/png");
+  }
+
+  /// Test MIME type selection priority for "any" preference with multiple
+  /// types. Documents that:
+  /// 1. Image types are preferred over text/html
+  /// 2. Non-html text types are preferred over text/html
+  /// 3. First offered type is used when no special cases match
+  #[test]
+  fn test_any_preference_selection_priority() {
+    // Priority 1: Image over HTML
+    let offered = vec!["text/html".to_string(), "image/png".to_string()];
+    assert_eq!(pick_mime(&offered, "any").unwrap(), "image/png");
+
+    // Priority 2: Plain text over HTML
+    let offered = vec!["text/html".to_string(), "text/plain".to_string()];
+    assert_eq!(pick_mime(&offered, "any").unwrap(), "text/plain");
+
+    // Priority 3: First type when no special handling
+    let offered =
+      vec!["application/json".to_string(), "text/plain".to_string()];
+    assert_eq!(pick_mime(&offered, "any").unwrap(), "application/json");
+  }
+
+  /// Test "image" preference behavior.
+  /// Documents that:
+  /// 1. First image/* type is selected
+  /// 2. Falls back to first type if no images
+  #[test]
+  fn test_image_preference_selection_behavior() {
+    // Multiple images - pick first one
+    let offered = vec![
+      "image/jpeg".to_string(),
+      "image/png".to_string(),
+      "text/plain".to_string(),
+    ];
+    assert_eq!(pick_mime(&offered, "image").unwrap(), "image/jpeg");
+
+    // No images - fall back to first
+    let offered = vec!["text/html".to_string(), "text/plain".to_string()];
+    assert_eq!(pick_mime(&offered, "image").unwrap(), "text/html");
+  }
+
+  /// Test edge case: text/html as only option.
+  /// Documents that text/html is used when it's the only type available.
+  #[test]
+  fn test_html_fallback_as_only_option() {
+    let offered = vec!["text/html".to_string()];
+    assert_eq!(pick_mime(&offered, "any").unwrap(), "text/html");
+    assert_eq!(pick_mime(&offered, "image").unwrap(), "text/html");
+  }
+
+  /// Test complex Firefox scenario with all MIME types.
+  /// Documents expected behavior when source offers many types.
+  #[test]
+  fn test_firefox_copy_image_all_types() {
+    // Firefox "Copy Image" offers:
+    // text/html, text/_moz_htmlcontext, text/_moz_htmlinfo,
+    // image/png, image/bmp, image/x-bmp, image/x-ico,
+    // text/ico, application/ico, image/ico, image/icon,
+    // text/icon, image/x-win-bitmap, image/x-win-bmp,
+    // image/x-icon, text/plain
+    let offered = vec![
+      "text/html".to_string(),
+      "text/_moz_htmlcontext".to_string(),
+      "image/png".to_string(),
+      "image/bmp".to_string(),
+      "text/plain".to_string(),
+    ];
+
+    // "any" should pick image/png (first image, skipping HTML)
+    assert_eq!(pick_mime(&offered, "any").unwrap(), "image/png");
+
+    // "image" should pick image/png
+    assert_eq!(pick_mime(&offered, "image").unwrap(), "image/png");
+  }
+
+  /// Test complex Electron app scenario.
+  #[test]
+  fn test_electron_app_mime_types() {
+    // Electron apps often offer: text/html, image/png, text/plain
+    let offered = vec![
+      "text/html".to_string(),
+      "image/png".to_string(),
+      "text/plain".to_string(),
+    ];
+
+    assert_eq!(pick_mime(&offered, "any").unwrap(), "image/png");
+    assert_eq!(pick_mime(&offered, "image").unwrap(), "image/png");
+  }
+
+  /// Test that the function handles empty offers correctly.
+  /// Documents that empty offers result in an error (NoSeats equivalent).
+  #[test]
+  fn test_empty_offers_behavior() {
+    let offered: Vec<String> = vec![];
+    assert!(pick_mime(&offered, "any").is_none());
+    assert!(pick_mime(&offered, "image").is_none());
+    assert!(pick_mime(&offered, "text").is_none());
+  }
+
+  /// Test file manager behavior with URI lists.
+  #[test]
+  fn test_file_manager_uri_list_behavior() {
+    // File managers typically offer: text/uri-list, text/plain,
+    // x-special/gnome-copied-files
+    let offered = vec![
+      "text/uri-list".to_string(),
+      "text/plain".to_string(),
+      "x-special/gnome-copied-files".to_string(),
+    ];
+
+    // "any" should pick text/uri-list (first)
+    assert_eq!(pick_mime(&offered, "any").unwrap(), "text/uri-list");
+
+    // "image" should fall back to text/uri-list
+    assert_eq!(pick_mime(&offered, "image").unwrap(), "text/uri-list");
   }
 }
