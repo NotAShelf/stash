@@ -1,6 +1,7 @@
 mod clipboard;
 mod commands;
 mod db;
+mod hash;
 mod mime;
 mod multicall;
 

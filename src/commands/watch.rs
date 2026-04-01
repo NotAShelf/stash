@@ -1,4 +1,4 @@
-use std::{collections::BinaryHeap, io::Read, time::Duration};
+use std::{collections::BinaryHeap, hash::Hasher, io::Read, time::Duration};
 
 use smol::Timer;
 use wl_clipboard_rs::{
@@ -15,35 +15,8 @@ use wl_clipboard_rs::{
 use crate::{
   clipboard::{self, ClipboardData, get_serving_pid},
   db::{SqliteClipboardDb, nonblocking::AsyncClipboardDb},
+  hash::Fnv1aHasher,
 };
-
-/// FNV-1a hasher for deterministic hashing across process runs.
-/// Unlike `DefaultHasher` (`SipHash`), this produces stable hashes.
-struct Fnv1aHasher {
-  state: u64,
-}
-
-impl Fnv1aHasher {
-  const FNV_OFFSET: u64 = 0xCBF29CE484222325;
-  const FNV_PRIME: u64 = 0x100000001B3;
-
-  fn new() -> Self {
-    Self {
-      state: Self::FNV_OFFSET,
-    }
-  }
-
-  fn write(&mut self, bytes: &[u8]) {
-    for byte in bytes {
-      self.state ^= u64::from(*byte);
-      self.state = self.state.wrapping_mul(Self::FNV_PRIME);
-    }
-  }
-
-  fn finish(&self) -> u64 {
-    self.state
-  }
-}
 
 /// Wrapper to provide [`Ord`] implementation for `f64` by negating values.
 /// This allows [`BinaryHeap`], which is a max-heap, to function as a min-heap.

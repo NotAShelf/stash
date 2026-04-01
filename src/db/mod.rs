@@ -11,6 +11,10 @@ use std::{
 
 pub mod nonblocking;
 
+use std::hash::Hasher;
+
+use crate::hash::Fnv1aHasher;
+
 /// Cache for process scanning results to avoid expensive `/proc` reads on every
 /// store operation. TTL of 5 seconds balances freshness with performance.
 struct ProcessCache {
@@ -63,35 +67,6 @@ impl ProcessCache {
       // Lock poisoned - fall back to uncached
       get_recently_active_excluded_app_uncached(excluded_apps)
     }
-  }
-}
-
-/// FNV-1a hasher for deterministic hashing across process runs.
-/// Unlike `DefaultHasher` (`SipHash` with random seed), this produces stable
-/// hashes.
-pub struct Fnv1aHasher {
-  state: u64,
-}
-
-impl Fnv1aHasher {
-  const FNV_OFFSET: u64 = 0xCBF29CE484222325;
-  const FNV_PRIME: u64 = 0x100000001B3;
-
-  pub fn new() -> Self {
-    Self {
-      state: Self::FNV_OFFSET,
-    }
-  }
-
-  pub fn write(&mut self, bytes: &[u8]) {
-    for byte in bytes {
-      self.state ^= u64::from(*byte);
-      self.state = self.state.wrapping_mul(Self::FNV_PRIME);
-    }
-  }
-
-  pub fn finish(&self) -> u64 {
-    self.state
   }
 }
 
