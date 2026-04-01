@@ -215,12 +215,18 @@ pub enum StashError {
   QueryDelete(Box<str>),
   #[error("Failed to delete entry with id {0}: {1}")]
   DeleteEntry(i64, Box<str>),
+
+  #[error("Encryption error: {0}")]
+  Encryption(Box<str>),
+  #[error("Decryption error: {0}")]
+  Decryption(Box<str>),
 }
 
 pub trait ClipboardDb {
   /// Store a new clipboard entry.
   ///
   /// # Arguments
+  ///
   /// * `input` - Reader for the clipboard content
   /// * `max_dedupe_search` - Maximum number of recent entries to check for
   ///   duplicates
@@ -595,11 +601,26 @@ impl SqliteClipboardDb {
         .get(2)
         .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
 
+      let decrypted_contents = if contents.starts_with(b"age-encryption.org/v1")
+      {
+        match decrypt_data(&contents) {
+          Ok(decrypted) => decrypted,
+          Err(e) => {
+            debug!(
+              "Skipping entry {id} in JSON output: decryption failed: {e}"
+            );
+            continue;
+          },
+        }
+      } else {
+        contents
+      };
+
       let contents_str = match mime.as_deref() {
         Some(m) if m.starts_with("text/") || m == "application/json" => {
-          String::from_utf8_lossy(&contents).into_owned()
+          String::from_utf8_lossy(&decrypted_contents).into_owned()
         },
-        _ => base64::prelude::BASE64_STANDARD.encode(&contents),
+        _ => base64::prelude::BASE64_STANDARD.encode(&decrypted_contents),
       };
       entries.push(serde_json::json!({
           "id": id,
@@ -689,13 +710,22 @@ impl ClipboardDb for SqliteClipboardDb {
       None => None,
     };
 
+    let encrypted_buf = if load_encryption_passphrase().is_some() {
+      Some(encrypt_data(&buf)?)
+    } else {
+      debug!("No encryption passphrase configured, storing entry unencrypted");
+      None
+    };
+
+    let contents_to_store = encrypted_buf.unwrap_or(buf);
+
     self
       .conn
       .execute(
         "INSERT INTO clipboard (contents, mime, content_hash, last_accessed, \
          mime_types) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
-          buf,
+          contents_to_store,
           mime,
           content_hash,
           std::time::SystemTime::now()
@@ -838,7 +868,20 @@ impl ClipboardDb for SqliteClipboardDb {
         .get(2)
         .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
 
-      let preview = preview_entry(&contents, mime.as_deref(), preview_width);
+      let preview_contents = if contents.starts_with(b"age-encryption.org/v1") {
+        match decrypt_data(&contents) {
+          Ok(decrypted) => decrypted,
+          Err(e) => {
+            debug!("skipping entry {id}: decryption failed: {e}");
+            continue;
+          },
+        }
+      } else {
+        contents
+      };
+
+      let preview =
+        preview_entry(&preview_contents, mime.as_deref(), preview_width);
       if writeln!(out, "{id}\t{preview}").is_ok() {
         listed += 1;
       }
@@ -872,8 +915,15 @@ impl ClipboardDb for SqliteClipboardDb {
         |row| Ok((row.get(0)?, row.get(1)?)),
       )
       .map_err(|e| StashError::DecodeGet(e.to_string().into()))?;
+
+    let decrypted_contents = if contents.starts_with(b"age-encryption.org/v1") {
+      decrypt_data(&contents)?
+    } else {
+      contents
+    };
+
     out
-      .write_all(&contents)
+      .write_all(&decrypted_contents)
       .map_err(|e| StashError::DecodeWrite(e.to_string().into()))?;
     log::info!("decoded entry with id {id}");
     Ok(())
@@ -898,7 +948,27 @@ impl ClipboardDb for SqliteClipboardDb {
       let contents: Vec<u8> = row
         .get(1)
         .map_err(|e| StashError::QueryDelete(e.to_string().into()))?;
-      if contents.windows(query.len()).any(|w| w == query.as_bytes()) {
+
+      let searchable_contents = if contents
+        .starts_with(b"age-encryption.org/v1")
+      {
+        match decrypt_data(&contents) {
+          Ok(decrypted) => decrypted,
+          Err(e) => {
+            warn!(
+              "Skipping entry {id} during delete_query: decryption failed: {e}"
+            );
+            continue;
+          },
+        }
+      } else {
+        contents
+      };
+
+      if searchable_contents
+        .windows(query.len())
+        .any(|w| w == query.as_bytes())
+      {
         self
           .conn
           .execute("DELETE FROM clipboard WHERE id = ?1", params![id])
@@ -963,7 +1033,13 @@ impl ClipboardDb for SqliteClipboardDb {
       }
     }
 
-    Ok((id, contents, mime))
+    let decrypted_contents = if contents.starts_with(b"age-encryption.org/v1") {
+      decrypt_data(&contents)?
+    } else {
+      contents
+    };
+
+    Ok((id, decrypted_contents, mime))
   }
 }
 
@@ -1038,7 +1114,21 @@ impl SqliteClipboardDb {
       let mime: Option<String> = row
         .get(2)
         .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
-      let preview = preview_entry(&contents, mime.as_deref(), preview_width);
+      let decrypted_contents = if contents.starts_with(b"age-encryption.org/v1")
+      {
+        match decrypt_data(&contents) {
+          Ok(decrypted) => decrypted,
+          Err(e) => {
+            debug!("Skipping entry {id} in TUI window: decryption failed: {e}");
+            continue;
+          },
+        }
+      } else {
+        contents
+      };
+
+      let preview =
+        preview_entry(&decrypted_contents, mime.as_deref(), preview_width);
       let mime_str = mime.unwrap_or_default();
       window.push((id, preview, mime_str));
     }
@@ -1155,10 +1245,23 @@ impl SqliteClipboardDb {
 /// changes made after daemon startup. Regex compilation is cached by
 /// pattern to avoid recompilation.
 fn load_sensitive_regex() -> Option<Regex> {
+  use std::process::Command;
+
   // Get the current pattern from env vars
-  let pattern = if let Ok(regex_path) = env::var("CREDENTIALS_DIRECTORY") {
-    let file = format!("{regex_path}/clipboard_filter");
+  let pattern = if let Ok(cred_dir) = env::var("CREDENTIALS_DIRECTORY") {
+    let file = format!("{cred_dir}/clipboard_filter");
     fs::read_to_string(&file).ok().map(|s| s.trim().to_string())
+  } else if let Ok(cmd) = env::var("STASH_SENSITIVE_REGEX_COMMAND") {
+    Command::new("sh")
+      .args(["-c", &cmd])
+      .output()
+      .ok()
+      .filter(|o| o.status.success())
+      .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+  } else if let Ok(file_path) = env::var("STASH_SENSITIVE_REGEX_FILE") {
+    fs::read_to_string(&file_path)
+      .ok()
+      .map(|s| s.trim().to_string())
   } else {
     env::var("STASH_SENSITIVE_REGEX").ok()
   }?;
@@ -1183,6 +1286,61 @@ fn load_sensitive_regex() -> Option<Regex> {
       cache.insert(pattern.clone(), regex.clone());
     }
   })
+}
+
+fn load_encryption_passphrase() -> Option<age::secrecy::SecretString> {
+  use std::process::Command;
+
+  static PASSPHRASE_CACHE: OnceLock<age::secrecy::SecretString> =
+    OnceLock::new();
+
+  if let Some(cached) = PASSPHRASE_CACHE.get() {
+    return Some(cached.clone());
+  }
+
+  let passphrase = if let Ok(cred_dir) = env::var("CREDENTIALS_DIRECTORY") {
+    let file = format!("{cred_dir}/stash_encryption_passphrase");
+    fs::read_to_string(&file).ok().map(|s| s.trim().to_owned())
+  } else if let Ok(cmd) = env::var("STASH_ENCRYPTION_PASSPHRASE_COMMAND") {
+    Command::new("sh")
+      .args(["-c", &cmd])
+      .output()
+      .ok()
+      .filter(|o| o.status.success())
+      .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+  } else if let Ok(file_path) = env::var("STASH_ENCRYPTION_PASSPHRASE_FILE") {
+    fs::read_to_string(&file_path)
+      .ok()
+      .map(|s| s.trim().to_owned())
+  } else {
+    env::var("STASH_ENCRYPTION_PASSPHRASE").ok()
+  }?;
+
+  let secret = age::secrecy::SecretString::from(passphrase);
+  let _ = PASSPHRASE_CACHE.set(secret.clone());
+  Some(secret)
+}
+
+fn encrypt_data(data: &[u8]) -> Result<Vec<u8>, StashError> {
+  let passphrase = load_encryption_passphrase().ok_or_else(|| {
+    StashError::Encryption("No encryption passphrase configured".into())
+  })?;
+
+  let recipient = age::scrypt::Recipient::new(passphrase);
+  let encrypted = age::encrypt(&recipient, data)
+    .map_err(|e| StashError::Encryption(e.to_string().into()))?;
+  Ok(encrypted)
+}
+
+fn decrypt_data(encrypted: &[u8]) -> Result<Vec<u8>, StashError> {
+  let passphrase = load_encryption_passphrase().ok_or_else(|| {
+    StashError::Decryption("No encryption passphrase configured".into())
+  })?;
+
+  let identity = age::scrypt::Identity::new(passphrase);
+  let decrypted = age::decrypt(&identity, encrypted)
+    .map_err(|e| StashError::Decryption(e.to_string().into()))?;
+  Ok(decrypted)
 }
 
 pub fn extract_id(input: &str) -> Result<i64, &'static str> {
