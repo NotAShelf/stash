@@ -32,9 +32,8 @@ use crate::{
     query::QueryCommand,
     store::StoreCommand,
     watch::WatchCommand,
-    wipe::WipeCommand,
   },
-  db::DEFAULT_MAX_ENTRY_SIZE,
+  db::{ClipboardDb, DEFAULT_MAX_ENTRY_SIZE},
 };
 
 #[derive(Parser)]
@@ -120,16 +119,6 @@ enum Command {
     r#type: Option<String>,
 
     /// Ask for confirmation before deleting
-    #[arg(long)]
-    ask: bool,
-  },
-
-  /// Wipe all clipboard history
-  ///
-  /// DEPRECATED: Use `stash db wipe` instead
-  #[command(hide = true)]
-  Wipe {
-    /// Ask for confirmation before wiping
     #[arg(long)]
     ask: bool,
   },
@@ -380,23 +369,6 @@ fn main() -> eyre::Result<()> {
           }
         }
       },
-      Some(Command::Wipe { ask }) => {
-        eprintln!(
-          "Warning: The 'stash wipe' command is deprecated. Use 'stash db \
-           wipe' instead."
-        );
-        let mut should_proceed = true;
-        if ask {
-          should_proceed =
-            confirm("Are you sure you want to wipe all clipboard history?");
-          if !should_proceed {
-            log::info!("wipe command aborted by user.");
-          }
-        }
-        if should_proceed {
-          report_error(db.wipe(), "failed to wipe database");
-        }
-      },
 
       Some(Command::Db { action }) => {
         match action {
@@ -424,7 +396,7 @@ fn main() -> eyre::Result<()> {
                   },
                 }
               } else {
-                report_error(db.wipe(), "failed to wipe database");
+                report_error(db.wipe_db(), "failed to wipe database");
               }
             }
           },
