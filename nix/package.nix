@@ -4,6 +4,7 @@
   stdenv,
   mold,
   versionCheckHook,
+  useMold ? stdenv.isLinux,
   createSymlinks ? true,
 }: let
   pname = "stash";
@@ -55,7 +56,7 @@ in
       done
     '';
 
-    env = lib.optionalAttrs (stdenv.isLinux && !stdenv.hostPlatform.isAarch) {
+    env = lib.optionalAttrs useMold {
       CARGO_LINKER = "clang";
       CARGO_RUSTFLAGS = "-Clink-arg=-fuse-ld=${mold}/bin/mold";
     };
