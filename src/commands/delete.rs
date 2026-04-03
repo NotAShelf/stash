@@ -9,7 +9,7 @@ pub trait DeleteCommand {
 impl DeleteCommand for SqliteClipboardDb {
   fn delete(&self, input: impl Read) -> Result<usize, StashError> {
     let deleted = self.delete_entries(input)?;
-    log::info!("Deleted {deleted} entries");
+    log::info!("deleted {deleted} entries");
     Ok(deleted)
   }
 }

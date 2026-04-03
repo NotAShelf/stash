@@ -204,6 +204,7 @@ pub trait WatchCommand {
     mime_type_preference: &str,
     min_size: Option<usize>,
     max_size: usize,
+    persist: bool,
   );
 }
 
@@ -217,12 +218,17 @@ impl WatchCommand for SqliteClipboardDb {
     mime_type_preference: &str,
     min_size: Option<usize>,
     max_size: usize,
+    persist: bool,
   ) {
     let async_db = AsyncClipboardDb::new(self.db_path.clone());
     log::info!(
       "Starting clipboard watch daemon with MIME type preference: \
        {mime_type_preference}"
     );
+
+    if persist {
+      log::info!("clipboard persistence enabled");
+    }
 
     // Build expiration queue from existing entries
     let mut exp_queue = ExpirationQueue::new();
@@ -234,11 +240,11 @@ impl WatchCommand for SqliteClipboardDb {
           exp_queue.push(expires_at, id);
         }
         if !exp_queue.is_empty() {
-          log::info!("Loaded {} expirations from database", exp_queue.len());
+          log::info!("loaded {} expirations from database", exp_queue.len());
         }
       },
       Err(e) => {
-        log::warn!("Failed to load expirations: {e}");
+        log::warn!("failed to load expirations: {e}");
       },
     }
 
@@ -277,7 +283,7 @@ impl WatchCommand for SqliteClipboardDb {
               match async_db.get_content_hash(id).await {
                 Ok(hash) => hash,
                 Err(e) => {
-                  log::warn!("Failed to get content hash for entry {id}: {e}");
+                  log::warn!("failed to get content hash for entry {id}: {e}");
                   None
                 },
               };
@@ -285,9 +291,9 @@ impl WatchCommand for SqliteClipboardDb {
             if let Some(stored_hash) = expired_hash {
               // Mark as expired
               if let Err(e) = async_db.mark_expired(id).await {
-                log::warn!("Failed to mark entry {id} as expired: {e}");
+                log::warn!("failed to mark entry {id} as expired: {e}");
               } else {
-                log::info!("Entry {id} marked as expired");
+                log::info!("entry {id} marked as expired");
               }
 
               // Check if this expired entry is currently in the clipboard
@@ -315,12 +321,12 @@ impl WatchCommand for SqliteClipboardDb {
                       .is_ok()
                     {
                       log::info!(
-                        "Cleared clipboard containing expired entry {id}"
+                        "cleared clipboard containing expired entry {id}"
                       );
                       last_hash = None; // reset tracked hash
                     } else {
                       log::warn!(
-                        "Failed to clear clipboard for expired entry {id}"
+                        "failed to clear clipboard for expired entry {id}"
                       );
                     }
                   }
@@ -337,7 +343,7 @@ impl WatchCommand for SqliteClipboardDb {
         Ok((mut reader, _mime_type, _all_mimes)) => {
           buf.clear();
           if let Err(e) = reader.read_to_end(&mut buf) {
-            log::error!("Failed to read clipboard contents: {e}");
+            log::error!("failed to read clipboard contents: {e}");
             Timer::after(Duration::from_millis(500)).await;
             continue;
           }
@@ -370,13 +376,13 @@ impl WatchCommand for SqliteClipboardDb {
                 .await
               {
                 Ok(id) => {
-                  log::info!("Stored new clipboard entry (id: {id})");
+                  log::info!("stored new clipboard entry (id: {id})");
                   last_hash = Some(current_hash);
 
                   // Persist clipboard: fork child to serve data
                   // This keeps the clipboard alive when source app closes
                   // Check if we're already serving to avoid duplicate processes
-                  if get_serving_pid().is_none() {
+                  if persist && get_serving_pid().is_none() {
                     let clipboard_data = ClipboardData::new(
                       buf_for_persist,
                       mime_types_for_persist,
@@ -393,12 +399,12 @@ impl WatchCommand for SqliteClipboardDb {
                         .await;
 
                         if let Err(e) = result {
-                          log::debug!("Clipboard persistence failed: {e}");
+                          log::debug!("clipboard persistence failed: {e}");
                         }
                       })
                       .detach();
                     }
-                  } else {
+                  } else if persist {
                     log::trace!(
                       "Already serving clipboard, skipping persistence fork"
                     );
@@ -420,17 +426,17 @@ impl WatchCommand for SqliteClipboardDb {
                   }
                 },
                 Err(crate::db::StashError::ExcludedByApp(_)) => {
-                  log::info!("Clipboard entry excluded by app filter");
+                  log::info!("clipboard entry excluded by app filter");
                   last_hash = Some(current_hash);
                 },
                 Err(crate::db::StashError::Store(ref msg))
                   if msg.contains("Excluded by app filter") =>
                 {
-                  log::info!("Clipboard entry excluded by app filter");
+                  log::info!("clipboard entry excluded by app filter");
                   last_hash = Some(current_hash);
                 },
                 Err(e) => {
-                  log::error!("Failed to store clipboard entry: {e}");
+                  log::error!("failed to store clipboard entry: {e}");
                   last_hash = Some(current_hash);
                 },
               }
@@ -440,7 +446,7 @@ impl WatchCommand for SqliteClipboardDb {
         Err(e) => {
           let error_msg = e.to_string();
           if !error_msg.contains("empty") {
-            log::error!("Failed to get clipboard contents: {e}");
+            log::error!("failed to get clipboard contents: {e}");
           }
         },
       }

@@ -175,7 +175,7 @@ unsafe fn fork_and_serve(prepared: PreparedCopy) -> PersistenceResult<()> {
 
     pid => {
       // Parent process, store child PID for loop detection
-      log::debug!("Forked clipboard persistence process (pid: {pid})");
+      log::debug!("forked clipboard persistence process (pid: {pid})");
       SERVING_PID.store(pid, Ordering::SeqCst);
       Ok(())
     },
@@ -185,18 +185,18 @@ unsafe fn fork_and_serve(prepared: PreparedCopy) -> PersistenceResult<()> {
 /// Child process entry point for serving clipboard data.
 fn serve_clipboard_child(prepared: PreparedCopy) {
   let pid = std::process::id() as i32;
-  log::debug!("Clipboard persistence child process started (pid: {pid})");
+  log::debug!("clipboard persistence child process started (pid: {pid})");
 
   // Serve clipboard requests. The PreparedCopy::serve() method blocks and
   // handles all the Wayland protocol interactions internally via
   // wl-clipboard-rs
   match prepared.serve() {
     Ok(()) => {
-      log::debug!("Clipboard persistence: serve completed normally");
+      log::debug!("clipboard persistence: serve completed normally");
     },
 
     Err(e) => {
-      log::error!("Clipboard persistence: serve failed: {e}");
+      log::error!("clipboard persistence: serve failed: {e}");
       exit(1);
     },
   }

@@ -421,7 +421,7 @@ fn handle_regular_paste(
   let selected_type = available_types.as_ref().and_then(select_best_mime_type);
 
   let mime_type = if let Some(ref best) = selected_type {
-    log::debug!("Auto-selecting MIME type: {best}");
+    log::debug!("auto-selecting MIME type: {best}");
     PasteMimeType::Specific(best)
   } else {
     get_paste_mime_type(args.mime_type.as_deref())

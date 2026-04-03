@@ -55,11 +55,11 @@ impl ImportCommand for SqliteClipboardDb {
       imported += 1;
     }
 
-    log::info!("Imported {imported} records from TSV into SQLite database.");
+    log::info!("imported {imported} records from TSV into SQLite database.");
 
     // Trim database to max_items after import
     self.trim_db(max_items)?;
-    log::info!("Trimmed clipboard database to max_items = {max_items}");
+    log::info!("trimmed clipboard database to max_items = {max_items}");
 
     Ok(())
   }

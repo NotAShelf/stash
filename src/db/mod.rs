@@ -875,7 +875,7 @@ impl ClipboardDb for SqliteClipboardDb {
     out
       .write_all(&contents)
       .map_err(|e| StashError::DecodeWrite(e.to_string().into()))?;
-    log::info!("Decoded entry with id {id}");
+    log::info!("decoded entry with id {id}");
     Ok(())
   }
 

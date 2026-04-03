@@ -7,7 +7,7 @@ pub trait WipeCommand {
 impl WipeCommand for SqliteClipboardDb {
   fn wipe(&self) -> Result<(), StashError> {
     self.wipe_db()?;
-    log::info!("Database wiped");
+    log::info!("database wiped");
     Ok(())
   }
 }

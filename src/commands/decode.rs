@@ -32,7 +32,7 @@ impl DecodeCommand for SqliteClipboardDb {
 
     // If input is empty or whitespace, treat as error and trigger fallback
     if input_str.trim().is_empty() {
-      log::debug!("No input provided to decode; relaying clipboard to stdout");
+      log::debug!("no input provided to decode; relaying clipboard to stdout");
       if let Ok((mut reader, _mime)) =
         get_contents(ClipboardType::Regular, Seat::Unspecified, MimeType::Any)
       {

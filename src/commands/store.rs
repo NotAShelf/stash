@@ -29,7 +29,7 @@ impl StoreCommand for SqliteClipboardDb {
   ) -> Result<(), crate::db::StashError> {
     if let Some("sensitive" | "clear") = state.as_deref() {
       self.delete_last()?;
-      log::info!("Entry deleted");
+      log::info!("entry deleted");
     } else {
       self.store_entry(
         input,
@@ -41,7 +41,7 @@ impl StoreCommand for SqliteClipboardDb {
         None, // no pre-computed hash for CLI store
         None, // no mime types for CLI store
       )?;
-      log::info!("Entry stored");
+      log::info!("entry stored");
     }
     Ok(())
   }

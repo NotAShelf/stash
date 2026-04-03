@@ -710,7 +710,7 @@ impl SqliteClipboardDb {
                           .show();
                       },
                       Err(e) => {
-                        log::error!("Failed to copy entry to clipboard: {e}");
+                        log::error!("failed to copy entry to clipboard: {e}");
                         let _ = Notification::new()
                           .summary("Stash")
                           .body(&format!("Failed to copy to clipboard: {e}"))
@@ -719,7 +719,7 @@ impl SqliteClipboardDb {
                     }
                   },
                   Err(e) => {
-                    log::error!("Failed to fetch entry {id}: {e}");
+                    log::error!("failed to fetch entry {id}: {e}");
                     let _ = Notification::new()
                       .summary("Stash")
                       .body(&format!("Failed to fetch entry: {e}"))

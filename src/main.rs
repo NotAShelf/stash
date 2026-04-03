@@ -160,6 +160,10 @@ enum Command {
     /// MIME type preference for clipboard reading.
     #[arg(short = 't', long, default_value = "any")]
     mime_type: String,
+
+    /// Persist clipboard contents after the source application closes.
+    #[arg(long)]
+    persist: bool,
   },
 }
 
@@ -201,7 +205,7 @@ fn confirm(prompt: &str) -> bool {
     .with_default(false)
     .prompt()
     .unwrap_or_else(|e| {
-      log::error!("Confirmation prompt failed: {e}");
+      log::error!("confirmation prompt failed: {e}");
       false
     })
 }
@@ -477,6 +481,7 @@ fn main() -> eyre::Result<()> {
       Some(Command::Watch {
         expire_after,
         mime_type,
+        persist,
       }) => {
         db.watch(
           cli.max_dedupe_search,
@@ -489,6 +494,7 @@ fn main() -> eyre::Result<()> {
           &mime_type,
           cli.min_size,
           cli.max_size,
+          persist,
         )
         .await;
       },
