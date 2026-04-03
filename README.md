@@ -320,6 +320,25 @@ ask the compositor for image data first. Most users will be fine using the
 default value (`any`) but in the case your browser (or other applications!)
 regularly misrepresent data, you might wish to prioritize a different type.
 
+#### Clipboard Persistence
+
+By default, when you copy something and close the source application, Wayland
+clears the clipboard. Stash can optionally keep the clipboard contents available
+after the source closes using the `--persist` flag.
+
+```bash
+stash watch --persist
+```
+
+When enabled, Stash will fork a background process to serve the clipboard
+contents, keeping them available even after the original application exits.
+
+> [!NOTE]
+> This feature is **opt-in** and disabled by default, as it may not be desirable
+> for all users and can leave clipboard data in memory longer than expected. You
+> must start the `stash watch` daemon with `--persist` for clipboard
+> persistence.
+
 ### Options
 
 Some commands take additional flags to modify Stash's behavior. See each
