@@ -606,7 +606,7 @@ impl SqliteClipboardDb {
         match decrypt_data(&contents) {
           Ok(decrypted) => decrypted,
           Err(e) => {
-            warn!("Skipping entry {id} in JSON output: decryption failed: {e}");
+            warn!("skipping entry {id}: decryption failed: {e}");
             continue;
           },
         }
@@ -865,8 +865,7 @@ impl ClipboardDb for SqliteClipboardDb {
       let mime: Option<String> = row
         .get(2)
         .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
-
-      let preview_contents = if contents.starts_with(b"age-encryption.org/v1") {
+      let preview_contents = if contents.starts_with(&[0x01u8]) {
         match decrypt_data(&contents) {
           Ok(decrypted) => decrypted,
           Err(e) => {
@@ -914,7 +913,7 @@ impl ClipboardDb for SqliteClipboardDb {
       )
       .map_err(|e| StashError::DecodeGet(e.to_string().into()))?;
 
-    let decrypted_contents = if contents.starts_with(b"age-encryption.org/v1") {
+    let decrypted_contents = if contents.starts_with(&[0x01u8]) {
       decrypt_data(&contents)?
     } else {
       contents
@@ -947,15 +946,11 @@ impl ClipboardDb for SqliteClipboardDb {
         .get(1)
         .map_err(|e| StashError::QueryDelete(e.to_string().into()))?;
 
-      let searchable_contents = if contents
-        .starts_with(b"age-encryption.org/v1")
-      {
+      let searchable_contents = if contents.starts_with(&[0x01u8]) {
         match decrypt_data(&contents) {
           Ok(decrypted) => decrypted,
           Err(e) => {
-            warn!(
-              "Skipping entry {id} during delete_query: decryption failed: {e}"
-            );
+            warn!("skipping entry {id}: decryption failed: {e}");
             continue;
           },
         }
@@ -1031,7 +1026,7 @@ impl ClipboardDb for SqliteClipboardDb {
       }
     }
 
-    let decrypted_contents = if contents.starts_with(b"age-encryption.org/v1") {
+    let decrypted_contents = if contents.starts_with(&[0x01u8]) {
       decrypt_data(&contents)?
     } else {
       contents
@@ -1112,12 +1107,11 @@ impl SqliteClipboardDb {
       let mime: Option<String> = row
         .get(2)
         .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
-      let decrypted_contents = if contents.starts_with(b"age-encryption.org/v1")
-      {
+      let decrypted_contents = if contents.starts_with(&[0x01u8]) {
         match decrypt_data(&contents) {
           Ok(decrypted) => decrypted,
           Err(e) => {
-            warn!("Skipping entry {id} in TUI window: decryption failed: {e}");
+            warn!("skipping entry {id}: decryption failed: {e}");
             continue;
           },
         }
@@ -1327,7 +1321,11 @@ fn encrypt_data(data: &[u8]) -> Result<Vec<u8>, StashError> {
   let recipient = age::scrypt::Recipient::new(passphrase);
   let encrypted = age::encrypt(&recipient, data)
     .map_err(|e| StashError::Encryption(e.to_string().into()))?;
-  Ok(encrypted)
+  // Prepend marker byte to identify our encrypted data
+  let mut result = Vec::with_capacity(1 + encrypted.len());
+  result.push(0x01u8);
+  result.extend_from_slice(&encrypted);
+  Ok(result)
 }
 
 fn decrypt_data(encrypted: &[u8]) -> Result<Vec<u8>, StashError> {
@@ -1335,8 +1333,11 @@ fn decrypt_data(encrypted: &[u8]) -> Result<Vec<u8>, StashError> {
     StashError::Decryption("No encryption passphrase configured".into())
   })?;
 
+  // Strip our marker byte if present
+  let data_to_decrypt = encrypted.strip_prefix(&[0x01u8]).unwrap_or(encrypted);
+
   let identity = age::scrypt::Identity::new(passphrase);
-  let decrypted = age::decrypt(&identity, encrypted)
+  let decrypted = age::decrypt(&identity, data_to_decrypt)
     .map_err(|e| StashError::Decryption(e.to_string().into()))?;
   Ok(decrypted)
 }
