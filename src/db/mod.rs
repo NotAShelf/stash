@@ -606,9 +606,7 @@ impl SqliteClipboardDb {
         match decrypt_data(&contents) {
           Ok(decrypted) => decrypted,
           Err(e) => {
-            debug!(
-              "Skipping entry {id} in JSON output: decryption failed: {e}"
-            );
+            warn!("Skipping entry {id} in JSON output: decryption failed: {e}");
             continue;
           },
         }
@@ -872,7 +870,7 @@ impl ClipboardDb for SqliteClipboardDb {
         match decrypt_data(&contents) {
           Ok(decrypted) => decrypted,
           Err(e) => {
-            debug!("skipping entry {id}: decryption failed: {e}");
+            warn!("skipping entry {id}: decryption failed: {e}");
             continue;
           },
         }
@@ -1119,7 +1117,7 @@ impl SqliteClipboardDb {
         match decrypt_data(&contents) {
           Ok(decrypted) => decrypted,
           Err(e) => {
-            debug!("Skipping entry {id} in TUI window: decryption failed: {e}");
+            warn!("Skipping entry {id} in TUI window: decryption failed: {e}");
             continue;
           },
         }
