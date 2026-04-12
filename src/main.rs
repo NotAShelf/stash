@@ -204,6 +204,12 @@ fn main() -> eyre::Result<()> {
   color_eyre::install()?;
 
   // Check if we're being called as a multicall binary
+  //
+  // NOTE: We cannot use clap's multicall here because it requires the main
+  // command to have no arguments (only subcommands), but our Cli has global
+  // arguments like --max-items, --db-path, etc. Instead, we manually detect
+  // the invocation name and route appropriately. While this is ugly, it's
+  // seemingly the only option.
   let program_name = env::args().next().map(|s| {
     PathBuf::from(s)
       .file_name()
