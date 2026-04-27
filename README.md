@@ -124,7 +124,7 @@ releases are made when a version gets tagged, and are available under
 - Build and install from source with Cargo:
 
   ```bash
-  cargo install stash --locked
+  cargo install stash-clipboard --locked
   ```
 
 Additionally, you may get Stash from source via `cargo install` using
