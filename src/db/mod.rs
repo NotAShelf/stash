@@ -338,215 +338,87 @@ impl SqliteClipboardDb {
     if schema_version == 0 {
       tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS clipboard (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                contents BLOB NOT NULL,
-                mime TEXT
-            );",
+          id       INTEGER PRIMARY KEY AUTOINCREMENT,
+          contents BLOB NOT NULL,
+          mime     TEXT
+        );",
       )
-      .map_err(|e| {
-        StashError::Store(
-          format!("Failed to create clipboard table: {e}").into(),
-        )
-      })?;
-
-      tx.execute("PRAGMA user_version = 1", []).map_err(|e| {
-        StashError::Store(format!("Failed to set schema version: {e}").into())
-      })?;
+      .map_err(migration_err)?;
+      tx.pragma_update(None, "user_version", 1i64)
+        .map_err(migration_err)?;
     }
 
-    // Add content_hash column if it doesn't exist. Migration MUST be done to
-    // avoid breaking existing installations.
     if schema_version < 2 {
-      let has_content_hash: bool = tx
-        .query_row(
-          "SELECT sql FROM sqlite_master WHERE type='table' AND \
-           name='clipboard'",
-          [],
-          |row| {
-            let sql: String = row.get(0)?;
-            Ok(sql.to_lowercase().contains("content_hash"))
-          },
-        )
-        .unwrap_or(false);
-
-      if !has_content_hash {
+      if !column_exists(&tx, "content_hash") {
         tx.execute("ALTER TABLE clipboard ADD COLUMN content_hash INTEGER", [])
-          .map_err(|e| {
-            StashError::Store(
-              format!("Failed to add content_hash column: {e}").into(),
-            )
-          })?;
+          .map_err(migration_err)?;
       }
-
-      // Create index for content_hash if it doesn't exist
       tx.execute(
         "CREATE INDEX IF NOT EXISTS idx_content_hash ON \
          clipboard(content_hash)",
         [],
       )
-      .map_err(|e| {
-        StashError::Store(
-          format!("Failed to create content_hash index: {e}").into(),
-        )
-      })?;
-
-      tx.execute("PRAGMA user_version = 2", []).map_err(|e| {
-        StashError::Store(format!("Failed to set schema version: {e}").into())
-      })?;
+      .map_err(migration_err)?;
+      tx.pragma_update(None, "user_version", 2i64)
+        .map_err(migration_err)?;
     }
 
-    // Add last_accessed column if it doesn't exist
     if schema_version < 3 {
-      let has_last_accessed: bool = tx
-        .query_row(
-          "SELECT sql FROM sqlite_master WHERE type='table' AND \
-           name='clipboard'",
-          [],
-          |row| {
-            let sql: String = row.get(0)?;
-            Ok(sql.to_lowercase().contains("last_accessed"))
-          },
-        )
-        .unwrap_or(false);
-
-      if !has_last_accessed {
+      if !column_exists(&tx, "last_accessed") {
         tx.execute("ALTER TABLE clipboard ADD COLUMN last_accessed INTEGER", [
         ])
-        .map_err(|e| {
-          StashError::Store(
-            format!("Failed to add last_accessed column: {e}").into(),
-          )
-        })?;
+        .map_err(migration_err)?;
       }
-
-      // Create index for last_accessed if it doesn't exist
       tx.execute(
         "CREATE INDEX IF NOT EXISTS idx_last_accessed ON \
          clipboard(last_accessed)",
         [],
       )
-      .map_err(|e| {
-        StashError::Store(
-          format!("Failed to create last_accessed index: {e}").into(),
-        )
-      })?;
-
-      tx.execute("PRAGMA user_version = 3", []).map_err(|e| {
-        StashError::Store(format!("Failed to set schema version: {e}").into())
-      })?;
+      .map_err(migration_err)?;
+      tx.pragma_update(None, "user_version", 3i64)
+        .map_err(migration_err)?;
     }
 
-    // Add expires_at column if it doesn't exist (v4)
     if schema_version < 4 {
-      let has_expires_at: bool = tx
-        .query_row(
-          "SELECT sql FROM sqlite_master WHERE type='table' AND \
-           name='clipboard'",
-          [],
-          |row| {
-            let sql: String = row.get(0)?;
-            Ok(sql.to_lowercase().contains("expires_at"))
-          },
-        )
-        .unwrap_or(false);
-
-      if !has_expires_at {
+      if !column_exists(&tx, "expires_at") {
         tx.execute("ALTER TABLE clipboard ADD COLUMN expires_at REAL", [])
-          .map_err(|e| {
-            StashError::Store(
-              format!("Failed to add expires_at column: {e}").into(),
-            )
-          })?;
+          .map_err(migration_err)?;
       }
-
-      // Create partial index for expires_at (only index non-NULL values)
       tx.execute(
         "CREATE INDEX IF NOT EXISTS idx_expires_at ON clipboard(expires_at) \
          WHERE expires_at IS NOT NULL",
         [],
       )
-      .map_err(|e| {
-        StashError::Store(
-          format!("Failed to create expires_at index: {e}").into(),
-        )
-      })?;
-
-      tx.execute("PRAGMA user_version = 4", []).map_err(|e| {
-        StashError::Store(format!("Failed to set schema version: {e}").into())
-      })?;
+      .map_err(migration_err)?;
+      tx.pragma_update(None, "user_version", 4i64)
+        .map_err(migration_err)?;
     }
 
-    // Add is_expired column if it doesn't exist (v5)
     if schema_version < 5 {
-      let has_is_expired: bool = tx
-        .query_row(
-          "SELECT sql FROM sqlite_master WHERE type='table' AND \
-           name='clipboard'",
-          [],
-          |row| {
-            let sql: String = row.get(0)?;
-            Ok(sql.to_lowercase().contains("is_expired"))
-          },
-        )
-        .unwrap_or(false);
-
-      if !has_is_expired {
+      if !column_exists(&tx, "is_expired") {
         tx.execute(
           "ALTER TABLE clipboard ADD COLUMN is_expired INTEGER DEFAULT 0",
           [],
         )
-        .map_err(|e| {
-          StashError::Store(
-            format!("Failed to add is_expired column: {e}").into(),
-          )
-        })?;
+        .map_err(migration_err)?;
       }
-
-      // Create index for is_expired (for filtering)
       tx.execute(
         "CREATE INDEX IF NOT EXISTS idx_is_expired ON clipboard(is_expired) \
          WHERE is_expired = 1",
         [],
       )
-      .map_err(|e| {
-        StashError::Store(
-          format!("Failed to create is_expired index: {e}").into(),
-        )
-      })?;
-
-      tx.execute("PRAGMA user_version = 5", []).map_err(|e| {
-        StashError::Store(format!("Failed to set schema version: {e}").into())
-      })?;
+      .map_err(migration_err)?;
+      tx.pragma_update(None, "user_version", 5i64)
+        .map_err(migration_err)?;
     }
 
-    // Add mime_types column if it doesn't exist (v6)
-    // Stores all MIME types offered by the source application as JSON array.
-    // Needed for clipboard persistence to re-offer the same types.
     if schema_version < 6 {
-      let has_mime_types: bool = tx
-        .query_row(
-          "SELECT sql FROM sqlite_master WHERE type='table' AND \
-           name='clipboard'",
-          [],
-          |row| {
-            let sql: String = row.get(0)?;
-            Ok(sql.to_lowercase().contains("mime_types"))
-          },
-        )
-        .unwrap_or(false);
-
-      if !has_mime_types {
+      if !column_exists(&tx, "mime_types") {
         tx.execute("ALTER TABLE clipboard ADD COLUMN mime_types TEXT", [])
-          .map_err(|e| {
-            StashError::Store(
-              format!("Failed to add mime_types column: {e}").into(),
-            )
-          })?;
+          .map_err(migration_err)?;
       }
-
-      tx.execute("PRAGMA user_version = 6", []).map_err(|e| {
-        StashError::Store(format!("Failed to set schema version: {e}").into())
-      })?;
+      tx.pragma_update(None, "user_version", 6i64)
+        .map_err(migration_err)?;
     }
 
     tx.commit().map_err(|e| {
@@ -555,12 +427,27 @@ impl SqliteClipboardDb {
       )
     })?;
 
-    // Initialize Wayland state in background thread. This will be used to track
-    // focused window state.
     #[cfg(feature = "use-toplevel")]
     crate::wayland::init_wayland_state();
     Ok(Self { conn, db_path })
   }
+}
+
+/// Check whether `column` exists in the `clipboard` table.
+fn column_exists(conn: &Connection, column: &str) -> bool {
+  conn
+    .prepare("PRAGMA table_info(clipboard)")
+    .and_then(|mut stmt| {
+      stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map(|rows| rows.filter_map(Result::ok).any(|c| c == column))
+    })
+    .unwrap_or(false)
+}
+
+/// Convert a rusqlite error into [`StashError::Store`].
+fn migration_err(e: rusqlite::Error) -> StashError {
+  StashError::Store(e.to_string().into())
 }
 
 impl SqliteClipboardDb {
@@ -765,7 +652,7 @@ impl ClipboardDb for SqliteClipboardDb {
         .conn
         .execute(
           "DELETE FROM clipboard WHERE id IN (SELECT id FROM clipboard ORDER \
-           BY id ASC LIMIT ?1)",
+           BY COALESCE(last_accessed, 0) ASC, id ASC LIMIT ?1)",
           params![i64::try_from(to_delete).unwrap_or(i64::MAX)],
         )
         .map_err(|e| StashError::Trim(e.to_string().into()))?;
@@ -928,40 +815,23 @@ impl ClipboardDb for SqliteClipboardDb {
     &self,
     id: i64,
   ) -> Result<(i64, Vec<u8>, Option<String>), StashError> {
-    let (contents, mime, content_hash): (Vec<u8>, Option<String>, Option<i64>) =
-      self
-        .conn
-        .query_row(
-          "SELECT contents, mime, content_hash FROM clipboard WHERE id = ?1",
-          params![id],
-          |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .map_err(|e| StashError::DecodeGet(e.to_string().into()))?;
+    let (contents, mime): (Vec<u8>, Option<String>) = self
+      .conn
+      .query_row(
+        "SELECT contents, mime FROM clipboard WHERE id = ?1",
+        params![id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+      )
+      .map_err(|e| StashError::DecodeGet(e.to_string().into()))?;
 
-    if let Some(hash) = content_hash {
-      let most_recent_id: Option<i64> = self
-        .conn
-        .query_row(
-          "SELECT id FROM clipboard WHERE content_hash = ?1 AND last_accessed \
-           = (SELECT MAX(last_accessed) FROM clipboard WHERE content_hash = \
-           ?1)",
-          params![hash],
-          |row| row.get(0),
-        )
-        .optional()
-        .map_err(|e| StashError::DecodeGet(e.to_string().into()))?;
-
-      if most_recent_id != Some(id) {
-        self
-          .conn
-          .execute(
-            "UPDATE clipboard SET last_accessed = CAST(strftime('%s', 'now') \
-             AS INTEGER) WHERE id = ?1",
-            params![id],
-          )
-          .map_err(|e| StashError::Store(e.to_string().into()))?;
-      }
-    }
+    self
+      .conn
+      .execute(
+        "UPDATE clipboard SET last_accessed = CAST(strftime('%s', 'now') AS \
+         INTEGER) WHERE id = ?1",
+        params![id],
+      )
+      .map_err(|e| StashError::Store(e.to_string().into()))?;
 
     Ok((id, contents, mime))
   }
@@ -1253,17 +1123,10 @@ pub fn size_str(size: usize) -> String {
 /// Check if clipboard should be excluded based on excluded apps configuration.
 /// Uses timing correlation and focused window detection to identify source app.
 fn should_exclude_by_app(excluded_apps: Option<&[String]>) -> bool {
-  let excluded = match excluded_apps {
-    Some(apps) if !apps.is_empty() => apps,
-    _ => return false,
-  };
-
-  // Try multiple detection strategies
-  if detect_excluded_app_activity(excluded) {
-    return true;
+  match excluded_apps {
+    Some(apps) if !apps.is_empty() => detect_excluded_app_activity(apps),
+    _ => false,
   }
-
-  false
 }
 
 /// Detect if clipboard likely came from an excluded app using multiple
@@ -2236,6 +2099,233 @@ mod tests {
       result2.is_some(),
       result3.is_some(),
       "Regex loading should be deterministic"
+    );
+  }
+
+  #[test]
+  fn test_migration_from_v3() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let db_path = temp_dir.path().join("test_v3.db");
+    let conn = Connection::open(&db_path).expect("open");
+    conn
+      .execute_batch(
+        "CREATE TABLE clipboard (
+           id            INTEGER PRIMARY KEY AUTOINCREMENT,
+           contents      BLOB NOT NULL,
+           mime          TEXT,
+           content_hash  INTEGER,
+           last_accessed INTEGER
+         );
+         INSERT INTO clipboard (contents, mime, content_hash) VALUES \
+         (x'010203', 'text/plain', 12345);",
+      )
+      .expect("create v3 schema");
+    conn
+      .pragma_update(None, "user_version", 3i64)
+      .expect("set version");
+
+    let db = SqliteClipboardDb::new(conn, db_path).expect("migrate");
+    assert_eq!(get_schema_version(&db.conn).expect("version"), 6);
+    assert!(table_column_exists(&db.conn, "clipboard", "expires_at"));
+    assert!(table_column_exists(&db.conn, "clipboard", "is_expired"));
+    assert!(table_column_exists(&db.conn, "clipboard", "mime_types"));
+    let count: i64 = db
+      .conn
+      .query_row("SELECT COUNT(*) FROM clipboard", [], |r| r.get(0))
+      .expect("count");
+    assert_eq!(count, 1, "existing data must survive migration");
+  }
+
+  #[test]
+  fn test_migration_from_v4() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let db_path = temp_dir.path().join("test_v4.db");
+    let conn = Connection::open(&db_path).expect("open");
+    conn
+      .execute_batch(
+        "CREATE TABLE clipboard (
+           id            INTEGER PRIMARY KEY AUTOINCREMENT,
+           contents      BLOB NOT NULL,
+           mime          TEXT,
+           content_hash  INTEGER,
+           last_accessed INTEGER,
+           expires_at    REAL
+         );
+         INSERT INTO clipboard (contents, mime) VALUES (x'aabbcc', \
+         'image/png');",
+      )
+      .expect("create v4 schema");
+    conn
+      .pragma_update(None, "user_version", 4i64)
+      .expect("set version");
+
+    let db = SqliteClipboardDb::new(conn, db_path).expect("migrate");
+    assert_eq!(get_schema_version(&db.conn).expect("version"), 6);
+    assert!(table_column_exists(&db.conn, "clipboard", "is_expired"));
+    assert!(table_column_exists(&db.conn, "clipboard", "mime_types"));
+    let count: i64 = db
+      .conn
+      .query_row("SELECT COUNT(*) FROM clipboard", [], |r| r.get(0))
+      .expect("count");
+    assert_eq!(count, 1, "existing data must survive migration");
+  }
+
+  #[test]
+  fn test_migration_from_v5() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let db_path = temp_dir.path().join("test_v5.db");
+    let conn = Connection::open(&db_path).expect("open");
+    conn
+      .execute_batch(
+        "CREATE TABLE clipboard (
+           id            INTEGER PRIMARY KEY AUTOINCREMENT,
+           contents      BLOB NOT NULL,
+           mime          TEXT,
+           content_hash  INTEGER,
+           last_accessed INTEGER,
+           expires_at    REAL,
+           is_expired    INTEGER DEFAULT 0
+         );
+         INSERT INTO clipboard (contents, mime) VALUES (x'deadbeef', \
+         'application/octet-stream');",
+      )
+      .expect("create v5 schema");
+    conn
+      .pragma_update(None, "user_version", 5i64)
+      .expect("set version");
+
+    let db = SqliteClipboardDb::new(conn, db_path).expect("migrate");
+    assert_eq!(get_schema_version(&db.conn).expect("version"), 6);
+    assert!(table_column_exists(&db.conn, "clipboard", "mime_types"));
+  }
+
+  /// Pre-migration entries (NULL content_hash) must have last_accessed
+  /// updated when accessed via copy_entry.
+  #[test]
+  fn test_copy_entry_updates_last_accessed_null_hash() {
+    let db = test_db();
+    db.conn
+      .execute(
+        "INSERT INTO clipboard (contents, mime, content_hash, last_accessed) \
+         VALUES (?1, 'text/plain', NULL, 0)",
+        rusqlite::params![b"legacy data".as_ref()],
+      )
+      .expect("insert null-hash entry");
+    let id: i64 = db
+      .conn
+      .query_row("SELECT last_insert_rowid()", [], |r| r.get(0))
+      .expect("id");
+
+    db.copy_entry(id).expect("copy");
+
+    let last_accessed: i64 = db
+      .conn
+      .query_row(
+        "SELECT last_accessed FROM clipboard WHERE id = ?1",
+        [id],
+        |r| r.get(0),
+      )
+      .expect("last_accessed");
+    assert!(
+      last_accessed > 0,
+      "last_accessed must be updated for null-hash entries"
+    );
+  }
+
+  /// trim_db must evict the least-recently-accessed entries, not the
+  /// lowest-id entries.
+  #[test]
+  fn test_trim_db_evicts_lru_not_oldest() {
+    let db = test_db();
+    let mut ids = Vec::new();
+    for i in 0..5u8 {
+      let id = db
+        .store_entry(
+          std::io::Cursor::new(vec![i; 4]),
+          0,
+          100,
+          None,
+          None,
+          DEFAULT_MAX_ENTRY_SIZE,
+          None,
+          None,
+        )
+        .expect("store");
+      ids.push(id);
+    }
+
+    // Zero out all timestamps so copy_entry produces a strictly higher value.
+    db.conn
+      .execute("UPDATE clipboard SET last_accessed = 0", [])
+      .expect("reset timestamps");
+
+    // Touch the first (oldest by id) entry to make it most-recently-used.
+    db.copy_entry(ids[0]).expect("copy");
+
+    // Trim to 4; ids[0] was just accessed and must survive.
+    db.trim_db(4).expect("trim");
+
+    let still_there: i64 = db
+      .conn
+      .query_row(
+        "SELECT COUNT(*) FROM clipboard WHERE id = ?1",
+        [ids[0]],
+        |r| r.get(0),
+      )
+      .expect("count");
+    assert_eq!(
+      still_there, 1,
+      "recently accessed entry must not be evicted"
+    );
+
+    let total: i64 = db
+      .conn
+      .query_row("SELECT COUNT(*) FROM clipboard", [], |r| r.get(0))
+      .expect("total");
+    assert_eq!(total, 4);
+  }
+
+  /// All new columns must be NULL for entries created before their respective
+  /// schema versions.
+  #[test]
+  fn test_migration_null_columns_for_legacy_entries() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let db_path = temp_dir.path().join("test_legacy.db");
+    {
+      let conn = Connection::open(&db_path).expect("open");
+      conn
+        .execute_batch(
+          "CREATE TABLE clipboard (
+             id       INTEGER PRIMARY KEY AUTOINCREMENT,
+             contents BLOB NOT NULL,
+             mime     TEXT
+           );
+           INSERT INTO clipboard (contents, mime) VALUES (x'68656c6c6f', \
+           'text/plain');",
+        )
+        .expect("create v0 schema");
+    }
+
+    let conn = Connection::open(&db_path).expect("open");
+    let db = SqliteClipboardDb::new(conn, db_path).expect("migrate");
+
+    let (hash, accessed, expires): (Option<i64>, Option<i64>, Option<f64>) = db
+      .conn
+      .query_row(
+        "SELECT content_hash, last_accessed, expires_at FROM clipboard WHERE \
+         id = 1",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+      )
+      .expect("query");
+    assert!(hash.is_none(), "content_hash must be NULL for pre-v2 entry");
+    assert!(
+      accessed.is_none(),
+      "last_accessed must be NULL for pre-v3 entry"
+    );
+    assert!(
+      expires.is_none(),
+      "expires_at must be NULL for pre-v4 entry"
     );
   }
 }

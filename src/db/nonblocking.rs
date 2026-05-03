@@ -8,6 +8,7 @@ use crate::db::{ClipboardDb, SqliteClipboardDb, StashError};
 /// on a thread pool to avoid blocking the async runtime. Since
 /// [`rusqlite::Connection`] is not Send, we store the database path and open a
 /// new connection for each operation.
+#[derive(Clone)]
 pub struct AsyncClipboardDb {
   db_path: PathBuf,
 }
@@ -72,25 +73,11 @@ impl AsyncClipboardDb {
            AND (is_expired IS NULL OR is_expired = 0) ORDER BY expires_at ASC",
         )
         .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
-
-      let mut rows = stmt
-        .query([])
-        .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
-      let mut expirations = Vec::new();
-
-      while let Some(row) = rows
-        .next()
+      stmt
+        .query_map([], |row| Ok((row.get::<_, f64>(0)?, row.get::<_, i64>(1)?)))
         .map_err(|e| StashError::ListDecode(e.to_string().into()))?
-      {
-        let exp = row
-          .get::<_, f64>(0)
-          .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
-        let id = row
-          .get::<_, i64>(1)
-          .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
-        expirations.push((exp, id));
-      }
-      Ok(expirations)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| StashError::ListDecode(e.to_string().into()))
     })
     .await
   }
@@ -133,14 +120,6 @@ impl AsyncClipboardDb {
       StashError::Store(format!("Failed to open database: {e}").into())
     })?;
     SqliteClipboardDb::new(conn, path.clone())
-  }
-}
-
-impl Clone for AsyncClipboardDb {
-  fn clone(&self) -> Self {
-    Self {
-      db_path: self.db_path.clone(),
-    }
   }
 }
 
