@@ -222,8 +222,7 @@ fn fork_and_serve(prepared_copy: wl_clipboard_rs::copy::PreparedCopy) {
       0 => {
         // Child process - serve clipboard content
         if let Err(e) = prepared_copy.serve() {
-          log::error!("background clipboard service failed: {e}");
-          std::process::exit(1);
+          log::debug!("background clipboard service ended: {e}");
         }
         std::process::exit(0);
       },

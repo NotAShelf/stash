@@ -456,6 +456,9 @@ fn handle_regular_paste(
         bail!("no content available and --no-newline specified");
       }
       if let Err(e) = out.write_all(&buf) {
+        if e.kind() == io::ErrorKind::BrokenPipe {
+          return Ok(());
+        }
         bail!("failed to write to stdout: {e}");
       }
 
@@ -471,12 +474,12 @@ fn handle_regular_paste(
           || types == "application/x-sh"
       };
 
-      if !args.no_newline
-        && is_text_content
-        && !buf.ends_with(b"\n")
-        && let Err(e) = out.write_all(b"\n")
-      {
-        bail!("failed to write newline to stdout: {e}");
+      if !args.no_newline && is_text_content && !buf.ends_with(b"\n") {
+        if let Err(e) = out.write_all(b"\n") {
+          if e.kind() != io::ErrorKind::BrokenPipe {
+            bail!("failed to write newline to stdout: {e}");
+          }
+        }
       }
     },
     Err(PasteError::NoSeats) => {

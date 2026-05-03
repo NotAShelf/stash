@@ -196,8 +196,7 @@ fn serve_clipboard_child(prepared: PreparedCopy) {
     },
 
     Err(e) => {
-      log::error!("clipboard persistence: serve failed: {e}");
-      exit(1);
+      log::debug!("clipboard persistence: serve ended: {e}");
     },
   }
 }
