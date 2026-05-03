@@ -435,6 +435,14 @@ impl WatchCommand for SqliteClipboardDb {
                   log::info!("clipboard entry excluded by app filter");
                   last_hash = Some(current_hash);
                 },
+                Err(crate::db::StashError::AllWhitespace) => {
+                  log::debug!("clipboard entry is all whitespace, skipping");
+                  last_hash = Some(current_hash);
+                },
+                Err(crate::db::StashError::TooSmall(_)) => {
+                  log::debug!("clipboard entry below minimum size, skipping");
+                  last_hash = Some(current_hash);
+                },
                 Err(e) => {
                   log::error!("failed to store clipboard entry: {e}");
                   last_hash = Some(current_hash);
@@ -518,8 +526,8 @@ mod tests {
 
   #[test]
   fn test_pick_image_preference_falls_back() {
+    // No image types in offer set; first type is used as fallback.
     let offered = vec!["text/html".to_string(), "text/plain".to_string()];
-    // No image types offered — falls back to first
     assert_eq!(pick_mime(&offered, "image").unwrap(), "text/html");
   }
 
@@ -550,14 +558,14 @@ mod tests {
 
   #[test]
   fn test_pick_html_fallback_when_only_html() {
-    // When text/html is the only type, pick it
+    // text/html is used when it is the only offered type.
     let offered = vec!["text/html".to_string()];
     assert_eq!(pick_mime(&offered, "any").unwrap(), "text/html");
   }
 
   #[test]
   fn test_pick_text_over_html_when_no_image() {
-    // Rich text copy: html + plain, no image — prefer plain text
+    // html + plain with no image type; plain text wins over html.
     let offered = vec!["text/html".to_string(), "text/plain".to_string()];
     assert_eq!(pick_mime(&offered, "any").unwrap(), "text/plain");
   }

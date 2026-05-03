@@ -698,7 +698,7 @@ impl SqliteClipboardDb {
                     let mime_type = match mime {
                       Some(ref m) if m == "text/plain" => MimeType::Text,
                       Some(ref m) => MimeType::Specific(m.clone().clone()),
-                      None => MimeType::Text,
+                      None => MimeType::Autodetect,
                     };
                     let copy_result = opts
                       .copy(Source::Bytes(contents.clone().into()), mime_type);
