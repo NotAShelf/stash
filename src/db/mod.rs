@@ -77,6 +77,7 @@ use regex::Regex;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use unicode_width::UnicodeWidthChar;
 
 pub const DEFAULT_MAX_ENTRY_SIZE: usize = 5_000_000;
 
@@ -1076,19 +1077,16 @@ pub fn preview_entry(data: &[u8], mime: Option<&str>, width: u32) -> String {
         return trimmed.to_string();
       }
 
-      // Only allocate new string if we need to replace whitespace
       let mut result = String::with_capacity(width as usize + 1);
-      for (char_count, c) in trimmed.chars().enumerate() {
-        if char_count >= width as usize {
+      let mut disp = 0usize;
+      for c in trimmed.chars() {
+        let cw = UnicodeWidthChar::width(c).unwrap_or(1);
+        if disp + cw > width as usize {
           result.push('…');
           break;
         }
-
-        if c.is_whitespace() {
-          result.push(' ');
-        } else {
-          result.push(c);
-        }
+        result.push(if c.is_whitespace() { ' ' } else { c });
+        disp += cw;
       }
       return result;
     }

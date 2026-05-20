@@ -168,7 +168,6 @@ impl TuiState {
     } else {
       self.cursor + 1
     };
-    self.dirty = true;
   }
 
   /// Move the cursor up by one, wrapping to `total - 1` at the top.
@@ -181,7 +180,6 @@ impl TuiState {
     } else {
       self.cursor - 1
     };
-    self.dirty = true;
   }
 
   /// Resize the window (e.g. terminal resized).  Marks dirty so the
@@ -515,30 +513,43 @@ impl SqliteClipboardDb {
               .enumerate()
               .map(|(i, entry)| {
                 let mut preview = String::new();
-                let mut width = 0;
+                let mut pwidth = 0usize;
                 for g in entry.1.graphemes(true) {
-                  let g_width = UnicodeWidthStr::width(g);
-                  if width + g_width > preview_col {
+                  let gw = UnicodeWidthStr::width(g);
+                  if pwidth + gw > preview_col {
                     preview.push('…');
+                    pwidth += 1;
                     break;
                   }
                   preview.push_str(g);
-                  width += g_width;
+                  pwidth += gw;
                 }
-                let mut mime = String::new();
-                let mut mwidth = 0;
-                for g in entry.2.graphemes(true) {
-                  let g_width = UnicodeWidthStr::width(g);
-                  if mwidth + g_width > mime_col {
-                    mime.push('…');
-                    break;
-                  }
-                  mime.push_str(g);
-                  mwidth += g_width;
+                let preview_pad = preview_col.saturating_sub(pwidth);
+                for _ in 0..preview_pad {
+                  preview.push(' ');
                 }
 
+                let mut mime_trunc = String::new();
+                let mut mwidth = 0usize;
+                for g in entry.2.graphemes(true) {
+                  let gw = UnicodeWidthStr::width(g);
+                  if mwidth + gw > mime_col {
+                    mime_trunc.push('…');
+                    mwidth += 1;
+                    break;
+                  }
+                  mime_trunc.push_str(g);
+                  mwidth += gw;
+                }
+                let mime_pad = mime_col.saturating_sub(mwidth);
+                let mime_padded = if mime_pad > 0 {
+                  format!("{}{mime_trunc}", " ".repeat(mime_pad))
+                } else {
+                  mime_trunc
+                };
+
+                let id = entry.0;
                 let mut spans = Vec::new();
-                let (id, preview, mime) = entry;
                 if Some(i) == selected {
                   spans.push(Span::styled(
                     highlight_symbol,
@@ -554,23 +565,23 @@ impl SqliteClipboardDb {
                   ));
                   spans.push(Span::raw(" "));
                   spans.push(Span::styled(
-                    format!("{preview:<preview_col$}"),
+                    preview,
                     Style::default()
                       .fg(Color::Yellow)
                       .add_modifier(Modifier::BOLD),
                   ));
                   spans.push(Span::raw(" "));
                   spans.push(Span::styled(
-                    format!("{mime:>mime_col$}"),
+                    mime_padded,
                     Style::default().fg(Color::Green),
                   ));
                 } else {
                   spans.push(Span::raw(" "));
                   spans.push(Span::raw(format!("{id:>id_col$}")));
                   spans.push(Span::raw(" "));
-                  spans.push(Span::raw(format!("{preview:<preview_col$}")));
+                  spans.push(Span::raw(preview));
                   spans.push(Span::raw(" "));
-                  spans.push(Span::raw(format!("{mime:>mime_col$}")));
+                  spans.push(Span::raw(mime_padded));
                 }
                 ListItem::new(Line::from(spans))
               })
@@ -635,15 +646,9 @@ impl SqliteClipboardDb {
           if actions.search_backspace {
             let new_query = tui
               .search_query
-              .chars()
+              .char_indices()
               .next_back()
-              .map(|_| {
-                tui
-                  .search_query
-                  .chars()
-                  .take(tui.search_query.len() - 1)
-                  .collect::<String>()
-              })
+              .map(|(i, _)| tui.search_query[..i].to_string())
               .unwrap_or_default();
             if tui.set_search(new_query) {
               // Search changed, refresh count and reset
