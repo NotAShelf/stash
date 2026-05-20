@@ -435,6 +435,13 @@ impl WatchCommand for SqliteClipboardDb {
                   log::info!("clipboard entry excluded by app filter");
                   last_hash = Some(current_hash);
                 },
+                Err(crate::db::StashError::SensitiveMimeHint) => {
+                  log::debug!(
+                    "clipboard entry excluded by password manager hint, \
+                     skipping"
+                  );
+                  last_hash = Some(current_hash);
+                },
                 Err(crate::db::StashError::AllWhitespace) => {
                   log::debug!("clipboard entry is all whitespace, skipping");
                   last_hash = Some(current_hash);

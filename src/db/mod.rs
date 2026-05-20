@@ -216,6 +216,63 @@ pub enum StashError {
   QueryDelete(Box<str>),
   #[error("Failed to delete entry with id {0}: {1}")]
   DeleteEntry(i64, Box<str>),
+
+  #[error("Encryption error: {0}")]
+  Encryption(Box<str>),
+  #[error("Decryption error: {0}")]
+  Decryption(Box<str>),
+  #[error("Entry excluded by password manager hint")]
+  SensitiveMimeHint,
+}
+
+/// On-disk encoding of a clipboard entry's content.
+///
+/// Age's output format is self-describing, i.e., it always begins with
+/// `age-encryption.org/v1\n`), so no extra marker bytes are needed. Probably.
+enum EntryEncoding {
+  Plain(Vec<u8>),
+  #[cfg(feature = "encryption")]
+  AgeEncrypted(Vec<u8>),
+}
+
+impl EntryEncoding {
+  #[cfg(feature = "encryption")]
+  const AGE_HEADER: &'static [u8] = b"age-encryption.org/v1\n";
+
+  fn classify(bytes: Vec<u8>) -> Self {
+    #[cfg(feature = "encryption")]
+    if bytes.starts_with(Self::AGE_HEADER) {
+      return Self::AgeEncrypted(bytes);
+    }
+    Self::Plain(bytes)
+  }
+
+  fn encode(plaintext: &[u8]) -> Result<Self, StashError> {
+    #[cfg(feature = "encryption")]
+    if let Some(passphrase) = load_encryption_passphrase() {
+      let recipient = age::scrypt::Recipient::new(passphrase);
+      let encrypted = age::encrypt(&recipient, plaintext)
+        .map_err(|e| StashError::Encryption(e.to_string().into()))?;
+      return Ok(Self::AgeEncrypted(encrypted));
+    }
+    Ok(Self::Plain(plaintext.to_vec()))
+  }
+
+  fn decode(self) -> Result<Vec<u8>, StashError> {
+    match self {
+      Self::Plain(b) => Ok(b),
+      #[cfg(feature = "encryption")]
+      Self::AgeEncrypted(b) => decrypt_cached(&b),
+    }
+  }
+
+  fn into_raw(self) -> Vec<u8> {
+    match self {
+      Self::Plain(b) => b,
+      #[cfg(feature = "encryption")]
+      Self::AgeEncrypted(b) => b,
+    }
+  }
 }
 
 pub trait ClipboardDb {
@@ -483,11 +540,18 @@ impl SqliteClipboardDb {
         .get(2)
         .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
 
+      let plaintext = match EntryEncoding::classify(contents).decode() {
+        Ok(p) => p,
+        Err(e) => {
+          warn!("skipping entry {id}: {e}");
+          continue;
+        },
+      };
       let contents_str = match mime.as_deref() {
         Some(m) if m.starts_with("text/") || m == "application/json" => {
-          String::from_utf8_lossy(&contents).into_owned()
+          String::from_utf8_lossy(&plaintext).into_owned()
         },
-        _ => base64::prelude::BASE64_STANDARD.encode(&contents),
+        _ => base64::prelude::BASE64_STANDARD.encode(&plaintext),
       };
       entries.push(serde_json::json!({
           "id": id,
@@ -565,6 +629,13 @@ impl ClipboardDb for SqliteClipboardDb {
       ));
     }
 
+    if mime_types.is_some_and(|types| {
+      types.iter().any(|m| m == "x-kde-passwordManagerHint")
+    }) {
+      warn!("clipboard entry excluded by password manager hint");
+      return Err(StashError::SensitiveMimeHint);
+    }
+
     self.deduplicate_by_hash(content_hash, max_dedupe_search)?;
 
     let mime_types_json: Option<String> = match mime_types {
@@ -577,13 +648,15 @@ impl ClipboardDb for SqliteClipboardDb {
       None => None,
     };
 
+    let contents_to_store = EntryEncoding::encode(&buf)?.into_raw();
+
     self
       .conn
       .execute(
         "INSERT INTO clipboard (contents, mime, content_hash, last_accessed, \
          mime_types) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
-          buf,
+          contents_to_store,
           mime,
           content_hash,
           std::time::SystemTime::now()
@@ -726,7 +799,14 @@ impl ClipboardDb for SqliteClipboardDb {
         .get(2)
         .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
 
-      let preview = preview_entry(&contents, mime.as_deref(), preview_width);
+      let plaintext = match EntryEncoding::classify(contents).decode() {
+        Ok(p) => p,
+        Err(e) => {
+          warn!("skipping entry {id}: {e}");
+          continue;
+        },
+      };
+      let preview = preview_entry(&plaintext, mime.as_deref(), preview_width);
       if writeln!(out, "{id}\t{preview}").is_ok() {
         listed += 1;
       }
@@ -760,8 +840,9 @@ impl ClipboardDb for SqliteClipboardDb {
         |row| Ok((row.get(0)?, row.get(1)?)),
       )
       .map_err(|e| StashError::DecodeGet(e.to_string().into()))?;
+    let plaintext = EntryEncoding::classify(contents).decode()?;
     out
-      .write_all(&contents)
+      .write_all(&plaintext)
       .map_err(|e| StashError::DecodeWrite(e.to_string().into()))?;
     log::info!("decoded entry with id {id}");
     Ok(())
@@ -786,7 +867,17 @@ impl ClipboardDb for SqliteClipboardDb {
       let contents: Vec<u8> = row
         .get(1)
         .map_err(|e| StashError::QueryDelete(e.to_string().into()))?;
-      if contents.windows(query.len()).any(|w| w == query.as_bytes()) {
+      let plaintext = match EntryEncoding::classify(contents).decode() {
+        Ok(p) => p,
+        Err(e) => {
+          warn!("skipping entry {id}: {e}");
+          continue;
+        },
+      };
+      if plaintext
+        .windows(query.len())
+        .any(|w| w == query.as_bytes())
+      {
         self
           .conn
           .execute("DELETE FROM clipboard WHERE id = ?1", params![id])
@@ -834,7 +925,8 @@ impl ClipboardDb for SqliteClipboardDb {
       )
       .map_err(|e| StashError::Store(e.to_string().into()))?;
 
-    Ok((id, contents, mime))
+    let plaintext = EntryEncoding::classify(contents).decode()?;
+    Ok((id, plaintext, mime))
   }
 }
 
@@ -909,7 +1001,14 @@ impl SqliteClipboardDb {
       let mime: Option<String> = row
         .get(2)
         .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
-      let preview = preview_entry(&contents, mime.as_deref(), preview_width);
+      let plaintext = match EntryEncoding::classify(contents).decode() {
+        Ok(p) => p,
+        Err(e) => {
+          warn!("skipping entry {id}: {e}");
+          continue;
+        },
+      };
+      let preview = preview_entry(&plaintext, mime.as_deref(), preview_width);
       let mime_str = mime.unwrap_or_default();
       window.push((id, preview, mime_str));
     }
@@ -1004,11 +1103,52 @@ impl SqliteClipboardDb {
     let size_bytes = page_count * page_size;
     let size_mb = size_bytes as f64 / 1024.0 / 1024.0;
 
+    let encrypted: i64 = self
+      .conn
+      .query_row(
+        "SELECT COUNT(*) FROM clipboard WHERE contents GLOB \
+         'age-encryption.org/v1' || char(10) || '*'",
+        [],
+        |row| row.get(0),
+      )
+      .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+
+    #[cfg(feature = "encryption")]
+    let undecryptable: i64 = {
+      let mut stmt = self
+        .conn
+        .prepare("SELECT contents FROM clipboard")
+        .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+      let mut rows = stmt
+        .query([])
+        .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+      let mut count = 0i64;
+      while let Some(row) = rows
+        .next()
+        .map_err(|e| StashError::ListDecode(e.to_string().into()))?
+      {
+        let contents: Vec<u8> = row
+          .get(0)
+          .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+        if contents.starts_with(b"age-encryption.org/v1\n")
+          && decrypt_cached(&contents).is_err()
+        {
+          count += 1;
+        }
+      }
+      count
+    };
+    #[cfg(not(feature = "encryption"))]
+    let undecryptable: i64 = encrypted;
+
     Ok(format!(
-      "Database Statistics:\n\nEntries:\nTotal:      {total}\nActive:     \
-       {active}\nExpired:    {expired}\nWith TTL:   \
-       {with_expiration}\n\nStorage:\nSize:       {size_mb:.2} MB \
-       ({size_bytes} bytes)\nPages:      {page_count}\nPage size:  \
+      "Database Statistics:\n\nEntries:\nTotal:          \
+       {total}\nActive:         {active}\nExpired:        \
+       {expired}\nWith TTL:       \
+       {with_expiration}\nEncrypted:      \
+       {encrypted}\nUndecryptable:  \
+       {undecryptable}\n\nStorage:\nSize:           {size_mb:.2} MB \
+       ({size_bytes} bytes)\nPages:          {page_count}\nPage size:      \
        {page_size} bytes"
     ))
   }
@@ -1026,10 +1166,23 @@ impl SqliteClipboardDb {
 /// changes made after daemon startup. Regex compilation is cached by
 /// pattern to avoid recompilation.
 fn load_sensitive_regex() -> Option<Regex> {
-  // Get the current pattern from env vars
-  let pattern = if let Ok(regex_path) = env::var("CREDENTIALS_DIRECTORY") {
-    let file = format!("{regex_path}/clipboard_filter");
+  use std::process::Command;
+
+  // Credential file takes highest priority (systemd LoadCredential)
+  let pattern = if let Ok(cred_dir) = env::var("CREDENTIALS_DIRECTORY") {
+    let file = format!("{cred_dir}/clipboard_filter");
     fs::read_to_string(&file).ok().map(|s| s.trim().to_string())
+  } else if let Ok(cmd) = env::var("STASH_SENSITIVE_REGEX_COMMAND") {
+    Command::new("sh")
+      .args(["-c", &cmd])
+      .output()
+      .ok()
+      .filter(|o| o.status.success())
+      .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+  } else if let Ok(file_path) = env::var("STASH_SENSITIVE_REGEX_FILE") {
+    fs::read_to_string(&file_path)
+      .ok()
+      .map(|s| s.trim().to_string())
   } else {
     env::var("STASH_SENSITIVE_REGEX").ok()
   }?;
@@ -1054,6 +1207,69 @@ fn load_sensitive_regex() -> Option<Regex> {
       cache.insert(pattern.clone(), regex.clone());
     }
   })
+}
+
+/// Load the encryption passphrase from environment or credential sources.
+///
+/// The passphrase is cached permanently via `OnceLock` on first successful
+/// load. This is intentional and differs from
+/// [`load_sensitive_regex`] which re-checks environment variables on every
+/// call: changing the encryption passphrase mid-session would make all
+/// previously encrypted entries permanently undecryptable, so the permanent
+/// cache prevents accidental passphrase changes from corrupting the
+/// clipboard history.
+#[cfg(feature = "encryption")]
+fn load_encryption_passphrase() -> Option<age::secrecy::SecretString> {
+  use std::process::Command;
+
+  static CACHE: OnceLock<age::secrecy::SecretString> = OnceLock::new();
+  if let Some(cached) = CACHE.get() {
+    return Some(cached.clone());
+  }
+
+  let passphrase = if let Ok(cred_dir) = env::var("CREDENTIALS_DIRECTORY") {
+    let file = format!("{cred_dir}/stash_encryption_passphrase");
+    fs::read_to_string(&file).ok().map(|s| s.trim().to_owned())
+  } else if let Ok(cmd) = env::var("STASH_ENCRYPTION_PASSPHRASE_COMMAND") {
+    Command::new("sh")
+      .args(["-c", &cmd])
+      .output()
+      .ok()
+      .filter(|o| o.status.success())
+      .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+  } else if let Ok(file_path) = env::var("STASH_ENCRYPTION_PASSPHRASE_FILE") {
+    fs::read_to_string(&file_path)
+      .ok()
+      .map(|s| s.trim().to_owned())
+  } else {
+    env::var("STASH_ENCRYPTION_PASSPHRASE").ok()
+  }?;
+
+  let secret = age::secrecy::SecretString::from(passphrase);
+  let _ = CACHE.set(secret.clone());
+  Some(secret)
+}
+
+/// Decrypt age-encrypted data using a cached scrypt identity.
+#[cfg(feature = "encryption")]
+fn decrypt_cached(ciphertext: &[u8]) -> Result<Vec<u8>, StashError> {
+  static CACHE: OnceLock<Mutex<Option<age::scrypt::Identity>>> =
+    OnceLock::new();
+  let cache = CACHE.get_or_init(|| Mutex::new(None));
+  let mut guard = cache.lock().map_err(|e| {
+    StashError::Decryption(format!("identity cache lock poisoned: {e}").into())
+  })?;
+  if guard.is_none() {
+    let passphrase = load_encryption_passphrase().ok_or_else(|| {
+      StashError::Decryption("no passphrase configured".into())
+    })?;
+    *guard = Some(age::scrypt::Identity::new(passphrase));
+  }
+  let identity = guard
+    .as_ref()
+    .ok_or_else(|| StashError::Decryption("identity not available".into()))?;
+  age::decrypt(identity, ciphertext)
+    .map_err(|e| StashError::Decryption(e.to_string().into()))
 }
 
 pub fn extract_id(input: &str) -> Result<i64, &'static str> {

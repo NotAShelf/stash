@@ -14,6 +14,7 @@ name = "stash"       # actual binary name for Nix, Cargo, etc.
 path = "src/main.rs"
 
 [dependencies]
+age                   = { version = "0.11.3", optional = true }
 arc-swap              = { version = "1.9.1", optional = true }
 base64                = "0.22.1"
 blocking              = "1.6.2"
@@ -49,7 +50,8 @@ futures  = "0.3.32"
 tempfile = "3.27.0"
 
 [features]
-default       = [ "notifications", "use-toplevel" ]
+default       = [ "notifications", "use-toplevel", "encryption" ]
+encryption    = [ "dep:age" ]
 notifications = [ "dep:notify-rust" ]
 use-toplevel  = [ "dep:arc-swap", "dep:wayland-client", "dep:wayland-protocols-wlr" ]
 
