@@ -5,7 +5,7 @@ self: {
   ...
 }: let
   inherit (lib.modules) mkIf;
-  inherit (lib.options) mkOption mkEnableOption mkPackageOption literalMD;
+  inherit (lib.options) mkOption mkEnableOption mkPackageOption;
   inherit (lib.types) listOf str;
   inherit (lib.strings) concatStringsSep;
   inherit (lib.meta) getExe;
@@ -15,7 +15,9 @@ in {
   options.services.stash-clipboard = {
     enable = mkEnableOption "stash, a Wayland clipboard manager";
 
-    package = mkPackageOption self.packages.${pkgs.system} ["stash"] {};
+    package = mkPackageOption self.packages.${pkgs.stdenv.hostPlatform.system} ["stash"] {
+      pkgsText = "self.packages.\${pkgs.stdenv.hostPlatform.system}";
+    };
 
     flags = mkOption {
       type = listOf str;
@@ -28,7 +30,7 @@ in {
       type = str;
       default = "";
       example = "{file}`/etc/stash/clipboard_filter`";
-      description = literalMD ''
+      description = ''
         File containing a regular expression to catch sensitive patterns. The file
         passed to this option must contain your regex pattern with no quotes.
 
