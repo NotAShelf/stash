@@ -20,9 +20,10 @@
 </div>
 
 <div align="center">
-  Lightweight & feature-rich Wayland clipboard "manager" with fast persistent history and
-  robust multi-media support. Stores and previews clipboard entries (text, images)
-  on the clipboard with a neat TUI and advanced scripting capabilities.
+  Lightweight & feature-rich Wayland clipboard "manager" with fast persistent
+  history and robust multi-media support. Stores and previews clipboard
+  entries (text, images) on the clipboard with a neat TUI and advanced
+  scripting capabilities.
 </div>
 
 <div align="center">
@@ -52,6 +53,8 @@ with many features such as but not necessarily limited to:
 - Drop-in replacement for `wl-clipboard` tools (`wl-copy` and `wl-paste`)
 - Sensitive clipboard filtering via regex (see below)
 - Sensitive clipboard filtering by application (see below)
+- Password manager hint filtering (`x-kde-passwordManagerHint`)
+- Optional at-rest encryption for database entries using age
 
 on top of the existing features of Cliphist, which are as follows:
 
@@ -270,8 +273,8 @@ stash db stats
 - `stash db vacuum`: Optimize the database using SQLite's VACUUM command,
   reclaiming space and improving performance.
 - `stash db stats`: Display database statistics including total/active/expired
-  entry counts, storage size, and page information. This is provided purely for
-  convenience and the rule of the cool.
+  entry counts, encrypted/undecryptable entry counts, storage size, and page
+  information.
 
 ### Watch clipboard for changes and store automatically
 
@@ -357,21 +360,36 @@ sensitive pattern, using a regular expression. This is useful for preventing
 accidental storage of secrets, passwords, or other sensitive data. You don't
 want sensitive data ending up in your persistent clipboard, right?
 
-The filter can be configured in one of three ways, as part of two separate
+The filter can be configured in several ways, as part of three separate
 features.
 
 #### Clipboard Filtering by Entry Regex
 
-This can be configured in one of two ways. You can use the **environment
-variable** `STASTH_SENSITIVE_REGEX` to a valid regex pattern, and if the
-clipboard text matches the regex it will not be stored. This can be used for
-trivial secrets such as but not limited to GitHub tokens or secrets that follow
-a rule, e.g. a prefix. You would typically set this in your `~/.bashrc` or
-similar but in some cases this might be a security flaw.
+This can be configured in several ways. The simplest is the **environment
+variable** `STASH_SENSITIVE_REGEX` set to a valid regex pattern; if the
+clipboard text matches, it will not be stored. Useful for trivial secrets such
+as GitHub tokens or secrets that follow a rule. You would typically set this in
+your `~/.bashrc` or similar, but in some cases this might be a security flaw.
 
-The safer alternative to this is using **Systemd LoadCrediental**. If Stash is
-running as a Systemd service, you can provide a regex pattern using a crediental
-file. For example, add to your `stash.service`:
+The less-insecure alternatives are:
+
+- `STASH_SENSITIVE_REGEX_FILE`: read the regex from a file path. Useful with
+  NixOS secrets managers like agenix or sops-nix.
+
+  ```bash
+  export STASH_SENSITIVE_REGEX_FILE=/run/secrets/stash/clipboard_filter
+  ```
+
+- `STASH_SENSITIVE_REGEX_COMMAND`: execute a shell command whose stdout is the
+  regex pattern. Works well with password managers.
+
+  ```bash
+  export STASH_SENSITIVE_REGEX_COMMAND="pass show stash/clipboard-filter"
+  ```
+
+The safest option is **Systemd LoadCredential**. If Stash is running as a
+Systemd service, you can provide a regex pattern using a credential file. For
+example, add to your `stash.service`:
 
 ```dosini
 LoadCredential=clipboard_filter:/etc/stash/clipboard_filter
@@ -382,9 +400,9 @@ quotes). This is done automatically in the
 [vendored Systemd service](./contrib/stash.service). Remember to set the
 appropriate file permissions if using this option.
 
-The service will check the credential file first, then the environment variable.
-If a clipboard entry matches the regex, it will be skipped and a warning will be
-logged.
+The service will check the credential file first, then the command, then the
+file path, then the environment variable. If a clipboard entry matches the
+regex, it will be skipped and a warning will be logged.
 
 > [!TIP]
 > **Example regex to block common password patterns**:
@@ -414,6 +432,72 @@ be only copied to the clipboard.
 > **Example startup command for Stash daemon**:
 >
 > `stash --excluded-apps Bitwarden watch`
+
+#### Clipboard Filtering by Password Manager Hint
+
+Stash automatically skips entries whose clipboard offer includes the
+`x-kde-passwordManagerHint` MIME type. This is the convention used by KeePassXC
+and compatible password managers to signal that clipboard content is sensitive
+and should not be persisted.
+
+No configuration is required. If the hint is present in the clipboard offer, the
+entry is dropped before storage. The entry is still available in your clipboard
+— it is only excluded from the persistent database.
+
+> [!NOTE]
+> This filter only applies via the watch daemon (`stash watch`), where MIME type
+> metadata is available from the Wayland clipboard protocol. Manual
+> `stash store` invocations do not have this context and are not filtered.
+
+### Database Encryption
+
+Stash supports encrypting clipboard entries at rest using the
+[age](https://age-encryption.org/) encryption format.
+
+Encryption is **opt-in** and only activates when a passphrase is configured.
+When one is configured, all new entries are encrypted before storage and
+decrypted transparently on retrieval. Entries stored without encryption remain
+as plaintext. Only new entries written after configuring encryption are
+encrypted.
+
+> [!WARNING]
+> Removing the passphrase after encrypted entries have been stored leaves those
+> entries permanently unreadable. There is no migration path short of wiping the
+> database. `stash db stats` reports affected entries as Undecryptable.
+>
+> Full-text search (`stash delete --type query`, TUI search) operates on raw
+> database contents. Encrypted entries will not match any search query.
+
+#### Configuration
+
+Provide a passphrase in one of these ways (checked in order):
+
+1. **Systemd LoadCredential** (safest): add to `stash.service`:
+
+   ```dosini
+   LoadCredential=stash_encryption_passphrase:/etc/stash/encryption_passphrase
+   ```
+
+2. **Command** — stdout of a shell command:
+
+   ```bash
+   export STASH_ENCRYPTION_PASSPHRASE_COMMAND="pass show stash/encryption-key"
+   ```
+
+3. **File** — path to a file containing the passphrase:
+
+   ```bash
+   export STASH_ENCRYPTION_PASSPHRASE_FILE=/run/secrets/stash/encryption_passphrase
+   ```
+
+4. **Environment variable** (least secure):
+
+   ```bash
+   export STASH_ENCRYPTION_PASSPHRASE="your-secure-passphrase"
+   ```
+
+> [!TIP]
+> Back up your passphrase. Encrypted entries cannot be recovered without it.
 
 ## Motivation
 
