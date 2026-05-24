@@ -1141,13 +1141,15 @@ impl SqliteClipboardDb {
     #[cfg(not(feature = "encryption"))]
     let undecryptable: i64 = encrypted;
 
+    let db_path = self.db_path.display();
     Ok(format!(
       "Database Statistics:\n\nEntries:\nTotal:          \
        {total}\nActive:         {active}\nExpired:        \
        {expired}\nWith TTL:       \
        {with_expiration}\nEncrypted:      \
        {encrypted}\nUndecryptable:  \
-       {undecryptable}\n\nStorage:\nSize:           {size_mb:.2} MB \
+       {undecryptable}\n\nStorage:\nPath:           \
+       {db_path}\nSize:           {size_mb:.2} MB \
        ({size_bytes} bytes)\nPages:          {page_count}\nPage size:      \
        {page_size} bytes"
     ))
