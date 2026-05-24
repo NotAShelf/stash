@@ -169,6 +169,13 @@ enum DbAction {
     ask: bool,
   },
 
+  /// Immediately expire all entries with a TTL
+  Expire {
+    /// Ask for confirmation before expiring
+    #[arg(long)]
+    ask: bool,
+  },
+
   /// Optimize database using VACUUM
   Vacuum,
 
@@ -404,6 +411,28 @@ fn main() -> eyre::Result<()> {
               } else {
                 report_error(db.wipe_db(), "failed to wipe database");
               }
+            }
+          },
+          DbAction::Expire { ask } => {
+            let should_proceed = !ask
+              || confirm(
+                "Are you sure you want to immediately expire all entries with \
+                 a TTL?",
+              );
+            if should_proceed {
+              match db.expire_ttl_entries() {
+                Ok(0) => {
+                  println!("no entries with a TTL to expire");
+                },
+                Ok(count) => {
+                  println!("marked {count} entries as expired");
+                },
+                Err(e) => {
+                  log::error!("failed to expire entries: {e}");
+                },
+              }
+            } else {
+              log::info!("db expire command aborted by user.");
             }
           },
           DbAction::Vacuum => {

@@ -1024,6 +1024,17 @@ impl SqliteClipboardDb {
   }
 
   /// Clean up all expired entries. Returns count deleted.
+  pub fn expire_ttl_entries(&self) -> Result<usize, StashError> {
+    self
+      .conn
+      .execute(
+        "UPDATE clipboard SET is_expired = 1 WHERE expires_at IS NOT NULL AND \
+         (is_expired IS NULL OR is_expired = 0)",
+        [],
+      )
+      .map_err(|e| StashError::Trim(e.to_string().into()))
+  }
+
   pub fn cleanup_expired(&self) -> Result<usize, StashError> {
     let now = Self::now();
     self
