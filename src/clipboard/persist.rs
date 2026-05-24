@@ -22,9 +22,25 @@ static SERVING_PID: AtomicI32 = AtomicI32::new(0);
 
 /// Get the current serving PID if any. Used by the watch loop to avoid
 /// duplicate persistence processes.
+///
+/// Probes the stored PID with `kill(pid, 0)` to detect children that have
+/// already exited (SIGCHLD is ignored so we never get reaped notifications).
+/// A stale PID is cleared and `None` is returned.
 pub fn get_serving_pid() -> Option<i32> {
   let pid = SERVING_PID.load(Ordering::SeqCst);
-  if pid != 0 { Some(pid) } else { None }
+  if pid == 0 {
+    return None;
+  }
+
+  // Signal 0 = existence check, no signal sent. Returns 0 if alive,
+  // -1 (ESRCH) if the PID is gone.
+  if unsafe { libc::kill(pid, 0) } == 0 {
+    Some(pid)
+  } else {
+    let _ =
+      SERVING_PID.compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst);
+    None
+  }
 }
 
 /// Result type for persistence operations.
@@ -155,6 +171,18 @@ unsafe fn fork_and_serve(prepared: PreparedCopy) -> PersistenceResult<()> {
   // Enable automatic child reaping to prevent zombie processes
   unsafe {
     libc::signal(libc::SIGCHLD, libc::SIG_IGN);
+  }
+
+  // Replace any prior serving child: a new clipboard entry supersedes the
+  // old offer (the compositor will invalidate it anyway the moment the new
+  // selection is taken). Without this, the old child lingers serving stale
+  // data until MAX_SERVE_REQUESTS or invalidation.
+  let prior = SERVING_PID.swap(0, Ordering::SeqCst);
+  if prior > 0 && unsafe { libc::kill(prior, 0) } == 0 {
+    unsafe {
+      libc::kill(prior, libc::SIGTERM);
+    }
+    log::debug!("terminated prior persistence child (pid: {prior})");
   }
 
   match unsafe { libc::fork() } {
