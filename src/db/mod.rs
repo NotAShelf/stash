@@ -1218,6 +1218,11 @@ fn load_sensitive_regex() -> Option<Regex> {
 /// previously encrypted entries permanently undecryptable, so the permanent
 /// cache prevents accidental passphrase changes from corrupting the
 /// clipboard history.
+///
+/// Removing the passphrase entirely (disabling encryption) after entries have
+/// been stored encrypted also renders those entries permanently unreadable.
+/// There is no migration path short of wiping the database. `stash stats`
+/// reports affected entries as Undecryptable.
 #[cfg(feature = "encryption")]
 fn load_encryption_passphrase() -> Option<age::secrecy::SecretString> {
   use std::process::Command;
@@ -1250,25 +1255,18 @@ fn load_encryption_passphrase() -> Option<age::secrecy::SecretString> {
   Some(secret)
 }
 
-/// Decrypt age-encrypted data using a cached scrypt identity.
+/// Decrypt age-encrypted data.
+///
+/// `age::scrypt::Identity::new` is cheap since it stores the passphrase only.
+/// The scrypt KDF runs inside `age::decrypt` per call, on the per-file salt
+/// embedded in the ciphertext header. Caching the Identity would not avoid
+/// it. The passphrase itself is cached by [`load_encryption_passphrase`].
 #[cfg(feature = "encryption")]
 fn decrypt_cached(ciphertext: &[u8]) -> Result<Vec<u8>, StashError> {
-  static CACHE: OnceLock<Mutex<Option<age::scrypt::Identity>>> =
-    OnceLock::new();
-  let cache = CACHE.get_or_init(|| Mutex::new(None));
-  let mut guard = cache.lock().map_err(|e| {
-    StashError::Decryption(format!("identity cache lock poisoned: {e}").into())
-  })?;
-  if guard.is_none() {
-    let passphrase = load_encryption_passphrase().ok_or_else(|| {
-      StashError::Decryption("no passphrase configured".into())
-    })?;
-    *guard = Some(age::scrypt::Identity::new(passphrase));
-  }
-  let identity = guard
-    .as_ref()
-    .ok_or_else(|| StashError::Decryption("identity not available".into()))?;
-  age::decrypt(identity, ciphertext)
+  let passphrase = load_encryption_passphrase()
+    .ok_or_else(|| StashError::Decryption("no passphrase configured".into()))?;
+  let identity = age::scrypt::Identity::new(passphrase);
+  age::decrypt(&identity, ciphertext)
     .map_err(|e| StashError::Decryption(e.to_string().into()))
 }
 
