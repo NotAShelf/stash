@@ -474,13 +474,11 @@ fn handle_regular_paste(
           || types == "application/x-sh"
       };
 
-      if !args.no_newline && is_text_content && !buf.ends_with(b"\n") {
-        if let Err(e) = out.write_all(b"\n") {
-          if e.kind() != io::ErrorKind::BrokenPipe {
+      if !args.no_newline && is_text_content && !buf.ends_with(b"\n")
+        && let Err(e) = out.write_all(b"\n")
+          && e.kind() != io::ErrorKind::BrokenPipe {
             bail!("failed to write newline to stdout: {e}");
           }
-        }
-      }
     },
     Err(PasteError::NoSeats) => {
       bail!("no seats available (is a Wayland compositor running?)");

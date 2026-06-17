@@ -396,18 +396,16 @@ impl SqliteClipboardDb {
             // Normal mode navigation commands
             match (key.code, key.modifiers) {
               (KeyCode::Char('q') | KeyCode::Esc, _) => actions.quit = true,
-              (KeyCode::Down | KeyCode::Char('j'), _) => {
+              (KeyCode::Down | KeyCode::Char('j'), _)
                 // Cap at +1 per frame for smooth scrolling
-                if actions.net_down < 1 {
+                if actions.net_down < 1 => {
                   actions.net_down += 1;
-                }
-              },
-              (KeyCode::Up | KeyCode::Char('k'), _) => {
+                },
+              (KeyCode::Up | KeyCode::Char('k'), _)
                 // Cap at -1 per frame for smooth scrolling
-                if actions.net_down > -1 {
+                if actions.net_down > -1 => {
                   actions.net_down -= 1;
-                }
-              },
+                },
               (KeyCode::Enter, _) => actions.copy = true,
               (KeyCode::Char('D'), KeyModifiers::SHIFT) => {
                 actions.delete = true;
