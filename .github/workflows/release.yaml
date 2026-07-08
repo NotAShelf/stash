@@ -28,7 +28,7 @@ jobs:
       - name: Tag
         run: |
           set -x
-          git tag $ndg_version
+          git tag $stash_version
           git push --tags || :
 
   create-release:
@@ -124,4 +124,3 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           files: SHA256SUMS
-
