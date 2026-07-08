@@ -13,7 +13,7 @@ use wl_clipboard_rs::{
 };
 
 use crate::{
-  clipboard::{self, ClipboardData, get_serving_pid},
+  clipboard::{self, ClipboardData},
   db::{SqliteClipboardDb, nonblocking::AsyncClipboardDb},
   hash::Fnv1aHasher,
 };
@@ -193,7 +193,10 @@ fn negotiate_mime_type(
   }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+  clippy::too_many_arguments,
+  reason = "watch command options are passed through from clap"
+)]
 pub trait WatchCommand {
   async fn watch(
     &self,
@@ -222,7 +225,7 @@ impl WatchCommand for SqliteClipboardDb {
   ) {
     let async_db = AsyncClipboardDb::new(self.db_path.clone());
     log::info!(
-      "Starting clipboard watch daemon with MIME type preference: \
+      "starting clipboard watch daemon with MIME type preference: \
        {mime_type_preference}"
     );
 
@@ -354,7 +357,10 @@ impl WatchCommand for SqliteClipboardDb {
             if last_hash != Some(current_hash) {
               // Clone buf for the async operation since it needs 'static
               let buf_clone = buf.clone();
-              #[allow(clippy::cast_possible_wrap)]
+              #[expect(
+                clippy::cast_possible_wrap,
+                reason = "stored hash preserves the u64 bit pattern in sqlite"
+              )]
               let content_hash = Some(current_hash as i64);
 
               // Clone data for persistence after successful store
@@ -379,21 +385,19 @@ impl WatchCommand for SqliteClipboardDb {
                   log::info!("stored new clipboard entry (id: {id})");
                   last_hash = Some(current_hash);
 
-                  // Persist clipboard: fork child to serve data
-                  // This keeps the clipboard alive when source app closes
-                  // Check if we're already serving to avoid duplicate processes
-                  if persist && get_serving_pid().is_none() {
+                  // Persist clipboard: fork child to serve data.
+                  if persist {
                     let clipboard_data = ClipboardData::new(
                       buf_for_persist,
                       mime_types_for_persist,
                       selected_mime,
                     );
 
-                    // Validate and persist in blocking task
-                    if clipboard_data.is_valid().is_ok() {
+                    if let Err(e) = clipboard_data.is_valid() {
+                      log::debug!("clipboard persistence skipped: {e}");
+                    } else {
                       smol::spawn(async move {
-                        // Use blocking task for fork operation
-                        let result = smol::unblock(move || unsafe {
+                        let result = smol::unblock(move || {
                           clipboard::persist_clipboard(clipboard_data)
                         })
                         .await;
@@ -404,10 +408,6 @@ impl WatchCommand for SqliteClipboardDb {
                       })
                       .detach();
                     }
-                  } else if persist {
-                    log::trace!(
-                      "Already serving clipboard, skipping persistence fork"
-                    );
                   }
 
                   // Set expiration if configured
@@ -418,7 +418,7 @@ impl WatchCommand for SqliteClipboardDb {
                       async_db.set_expiration(id, expires_at).await
                     {
                       log::warn!(
-                        "Failed to set expiration for entry {id}: {e}"
+                        "failed to set expiration for entry {id}: {e}"
                       );
                     } else {
                       exp_queue.push(expires_at, id);
@@ -430,9 +430,15 @@ impl WatchCommand for SqliteClipboardDb {
                   last_hash = Some(current_hash);
                 },
                 Err(crate::db::StashError::Store(ref msg))
-                  if msg.contains("Excluded by app filter") =>
+                  if msg.contains("excluded by app filter") =>
                 {
                   log::info!("clipboard entry excluded by app filter");
+                  last_hash = Some(current_hash);
+                },
+                Err(crate::db::StashError::Store(ref msg))
+                  if msg.contains("filtered by sensitive regex") =>
+                {
+                  log::debug!("clipboard entry excluded by sensitive regex");
                   last_hash = Some(current_hash);
                 },
                 Err(crate::db::StashError::SensitiveMimeHint) => {

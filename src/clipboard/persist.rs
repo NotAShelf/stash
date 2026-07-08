@@ -20,48 +20,25 @@ const MAX_SERVE_REQUESTS: usize = 1000;
 /// clipboard content is from our own serve process.
 static SERVING_PID: AtomicI32 = AtomicI32::new(0);
 
-/// Get the current serving PID if any. Used by the watch loop to avoid
-/// duplicate persistence processes.
-///
-/// Probes the stored PID with `kill(pid, 0)` to detect children that have
-/// already exited (SIGCHLD is ignored so we never get reaped notifications).
-/// A stale PID is cleared and `None` is returned.
-pub fn get_serving_pid() -> Option<i32> {
-  let pid = SERVING_PID.load(Ordering::SeqCst);
-  if pid == 0 {
-    return None;
-  }
-
-  // Signal 0 = existence check, no signal sent. Returns 0 if alive,
-  // -1 (ESRCH) if the PID is gone.
-  if unsafe { libc::kill(pid, 0) } == 0 {
-    Some(pid)
-  } else {
-    let _ =
-      SERVING_PID.compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst);
-    None
-  }
-}
-
 /// Result type for persistence operations.
 pub type PersistenceResult<T> = Result<T, PersistenceError>;
 
 /// Errors that can occur during clipboard persistence.
 #[derive(Debug, thiserror::Error)]
 pub enum PersistenceError {
-  #[error("Failed to prepare copy: {0}")]
+  #[error("failed to prepare copy: {0}")]
   PrepareFailed(String),
 
-  #[error("Failed to fork: {0}")]
+  #[error("failed to fork: {0}")]
   ForkFailed(String),
 
-  #[error("Clipboard data too large: {0} bytes")]
+  #[error("clipboard data too large: {0} bytes")]
   DataTooLarge(usize),
 
-  #[error("Clipboard content is empty")]
+  #[error("clipboard content is empty")]
   EmptyContent,
 
-  #[error("No MIME types to offer")]
+  #[error("no mime types to offer")]
   NoMimeTypes,
 }
 
@@ -114,16 +91,11 @@ impl ClipboardData {
 
 /// Persist clipboard data by forking a background process that serves it.
 ///
-/// 1. Prepares a clipboard copy operation with all MIME types
+/// 1. Prepares a clipboard copy operation with the selected MIME type
 /// 2. Forks a child process
 /// 3. The child serves clipboard data indefinitely (until MAX_SERVE_REQUESTS)
 /// 4. The parent returns immediately
-///
-/// # Safety
-///
-/// This function uses `libc::fork()` which is unsafe. The child process
-/// must not modify any shared state or file descriptors.
-pub unsafe fn persist_clipboard(data: ClipboardData) -> PersistenceResult<()> {
+pub fn persist_clipboard(data: ClipboardData) -> PersistenceResult<()> {
   // Validate data
   data.is_valid()?;
 
@@ -131,10 +103,10 @@ pub unsafe fn persist_clipboard(data: ClipboardData) -> PersistenceResult<()> {
   let prepared = prepare_clipboard_copy(&data)?;
 
   // Fork and serve
-  unsafe { fork_and_serve(prepared) }
+  fork_and_serve(prepared)
 }
 
-/// Prepare a clipboard copy operation with all MIME types.
+/// Prepare a clipboard copy operation with the selected MIME type.
 fn prepare_clipboard_copy(
   data: &ClipboardData,
 ) -> PersistenceResult<PreparedCopy> {
@@ -167,8 +139,10 @@ fn prepare_clipboard_copy(
 /// 3. Exit cleanly
 ///
 /// The parent stores the child `PID` in `SERVING_PID` and returns immediately.
-unsafe fn fork_and_serve(prepared: PreparedCopy) -> PersistenceResult<()> {
+fn fork_and_serve(prepared: PreparedCopy) -> PersistenceResult<()> {
   // Enable automatic child reaping to prevent zombie processes
+  // SAFETY: installing SIG_IGN for SIGCHLD is process-global and intentional
+  // for this helper, which only needs fire-and-forget clipboard children.
   unsafe {
     libc::signal(libc::SIGCHLD, libc::SIG_IGN);
   }
@@ -178,24 +152,26 @@ unsafe fn fork_and_serve(prepared: PreparedCopy) -> PersistenceResult<()> {
   // selection is taken). Without this, the old child lingers serving stale
   // data until MAX_SERVE_REQUESTS or invalidation.
   let prior = SERVING_PID.swap(0, Ordering::SeqCst);
+  // SAFETY: signal 0 checks process existence without delivering a signal.
   if prior > 0 && unsafe { libc::kill(prior, 0) } == 0 {
+    // SAFETY: `prior` is a live child PID recorded by this process.
     unsafe {
       libc::kill(prior, libc::SIGTERM);
     }
     log::debug!("terminated prior persistence child (pid: {prior})");
   }
 
+  // SAFETY: after fork, the child immediately serves the prepared Wayland copy
+  // and exits without returning to the async runtime.
   match unsafe { libc::fork() } {
     0 => {
       // Child process - clear serving PID
-      // Look at me. I'm the server now.
       SERVING_PID.store(0, Ordering::SeqCst);
       serve_clipboard_child(prepared);
       exit(0);
     },
 
     -1 => {
-      // Oops.
       Err(PersistenceError::ForkFailed(
         "libc::fork() returned -1".to_string(),
       ))
