@@ -7,7 +7,7 @@ self: {
   inherit (lib.modules) mkIf;
   inherit (lib.options) mkOption mkEnableOption mkPackageOption;
   inherit (lib.types) listOf str;
-  inherit (lib.strings) concatStringsSep;
+  inherit (lib.strings) concatStringsSep escapeShellArgs;
   inherit (lib.meta) getExe;
 
   cfg = config.services.stash-clipboard;
@@ -22,8 +22,8 @@ in {
     flags = mkOption {
       type = listOf str;
       default = [];
-      example = ["--max-items 10"];
-      description = "Flags to pass to stash watch.";
+      example = ["--max-items" "10"];
+      description = "Global flags to pass before `stash watch`.";
     };
 
     filterFile = mkOption {
@@ -67,7 +67,7 @@ in {
         after = ["graphical-session.target"];
 
         serviceConfig = {
-          ExecStart = "${getExe cfg.package} ${concatStringsSep " " cfg.flags} watch";
+          ExecStart = "${getExe cfg.package} ${escapeShellArgs (cfg.flags ++ ["watch"])}";
           LoadCredential = mkIf (cfg.filterFile != "") "clipboard_filter:${cfg.filterFile}";
         };
 

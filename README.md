@@ -132,7 +132,7 @@ releases are made when a version gets tagged, and are available under
 
 Additionally, you may get Stash from source via `cargo install` using
 `cargo install --git https://github.com/notashelf/stash --locked` or you may
-check out to the repository, and use Cargo to build it. You'll need Rust 1.91.0
+check out to the repository, and use Cargo to build it. You'll need Rust 1.95.0
 or above. Most distributions should package this version already. You may, of
 course, prefer to package the built releases if you'd like.
 
@@ -176,6 +176,10 @@ Options:
           Maximum number of clipboard entries to keep [default: 18446744073709551615]
       --max-dedupe-search <MAX_DEDUPE_SEARCH>
           Number of recent entries to check for duplicates when storing new clipboard data [default: 20]
+      --min-size <MIN_SIZE>
+          Minimum size (in bytes) for clipboard entries. Entries smaller than this will not be stored [env: STASH_MIN_SIZE=]
+      --max-size <MAX_SIZE>
+          Maximum size (in bytes) for clipboard entries. Entries larger than this will not be stored. Defaults to 5MB [env: STASH_MAX_SIZE=] [default: 5000000]
       --preview-width <PREVIEW_WIDTH>
           Maximum width (in characters) for clipboard entry previews in list output [default: 100]
       --db-path <DB_PATH>
@@ -247,16 +251,6 @@ desirable for all users. If you wish to be explicit, pass `--type` to
 stash delete --type id < ids.txt
 ```
 
-### Wipe all entries
-
-> [!WARNING]
-> This command is deprecated, and will be removed in v0.4.0. Use `stash db wipe`
-> instead.
-
-```bash
-stash wipe
-```
-
 ### Database management
 
 Stash provides a `db` subcommand for database maintenance operations:
@@ -268,8 +262,8 @@ stash db stats
 ```
 
 - `stash db wipe`: Remove all entries from the database. Use `--expired` to only
-  wipe expired entries instead of all entries. Requires `--ask` confirmation by
-  default.
+  wipe expired entries instead of all entries. Use `--ask` or global `--ask`
+  when you want an interactive confirmation prompt.
 - `stash db vacuum`: Optimize the database using SQLite's VACUUM command,
   reclaiming space and improving performance.
 - `stash db stats`: Display database statistics including total/active/expired
@@ -423,10 +417,10 @@ environment variable to block entries from persisting in the database if they
 are coming from your password manager for example. The entry is still copied to
 the clipboard, but it will never be put inside the database.
 
-This is a more robust alternative to using the regex method above, since you
-likely do not want to catch your passwords with a regex. Simply pass your
-password manager's **window class** to `--excluded-apps` and your passwords will
-be only copied to the clipboard.
+This is a focused-window alternative to using the regex method above, since you
+likely do not want to catch your passwords with a regex. Pass your password
+manager's **window class** to `--excluded-apps` and entries copied while that
+window is focused will be skipped.
 
 > [!TIP]
 > **Example startup command for Stash daemon**:
@@ -524,7 +518,7 @@ should know.
 - Most Cliphist commands have direct equivalents in Stash. For example,
   `cliphist store` -> `stash store`, `cliphist list` -> `stash list`, etc.
 - Cliphist uses `delete-query`; in Stash, you must use
-  `stash delete --type query --arg "your query"`.
+  `stash delete --type query "your query"`.
 - Both Cliphist and Stash support deleting by ID, including from stdin or a
   file.
 - Stash respects the `STASH_CLIPBOARD_STATE` environment variable for
@@ -590,14 +584,10 @@ figured out something new, e.g. a neat shell trick, feel free to add it here!
    cliphist list --db ~/.cache/cliphist/db | stash import
    ```
 
-3. Stash provides its own implementation of `wl-copy` and `wl-paste` commands
-   backed by `wl-clipboard-rs`. Those implementations are backwards compatible
-   with `wl-clipboard`, and may be used as **drop-in** replacements. The default
-   build wrapper in `build.rs` links `stash` to `stash-copy` and `stash-paste`,
-   which are also available as `wl-copy` and `wl-paste` respectively. The Nix
-   package automatically links those to `$out/bin` for you, which means they are
-   installed by default but other package managers may need additional steps by
-   the packagers. While building from source, you may link
+3. Stash provides common-compatible `wl-copy` and `wl-paste` implementations
+   backed by `wl-clipboard-rs`. The Nix package links `stash` as `stash-copy`,
+   `stash-paste`, `wl-copy`, and `wl-paste` in `$out/bin`. Other package
+   managers may need to add equivalent links; when building from source, link
    `target/release/stash` manually.
 
 ### Entry Expiration
@@ -668,6 +658,10 @@ clipboard automatically. This prevents accidentally pasting outdated content.
 Stash uses SQLite for persistent storage. Over time, deleted entries and
 fragmentation can affect performance. Use the `stash db` command to maintain
 your database:
+
+Stash opens SQLite in WAL mode with `synchronous=NORMAL`, which is a balanced
+default for desktop clipboard history: writes stay fast while avoiding the
+data-loss profile of an in-memory journal.
 
 - **Check statistics**: `stash db stats` shows entry counts and storage usage.
   Use this to monitor growth and decide when to clean up.
