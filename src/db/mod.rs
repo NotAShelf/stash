@@ -6,69 +6,11 @@ use std::{
   path::PathBuf,
   str,
   sync::{Mutex, OnceLock},
-  time::{Duration, Instant},
 };
 
 pub mod nonblocking;
 
 use std::hash::Hasher;
-
-use crate::hash::Fnv1aHasher;
-
-/// Cache for process scanning results to avoid expensive `/proc` reads on every
-/// store operation. TTL of 5 seconds balances freshness with performance.
-struct ProcessCache {
-  last_scan:    Instant,
-  excluded_app: Option<String>,
-}
-
-impl ProcessCache {
-  const TTL: Duration = Duration::from_secs(5);
-
-  /// Check cache for recently active excluded app.
-  /// Only caches positive results (when an excluded app IS found).
-  /// Negative results (no excluded apps) are never cached to ensure
-  /// we don't miss exclusions when users switch apps.
-  fn get(excluded_apps: &[String]) -> Option<String> {
-    static CACHE: OnceLock<Mutex<ProcessCache>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| {
-      Mutex::new(ProcessCache {
-        last_scan:    Instant::now().checked_sub(Self::TTL).unwrap(), /* Expire immediately on
-                                                   * first use */
-        excluded_app: None,
-      })
-    });
-
-    if let Ok(mut cache) = cache.lock() {
-      // Check if we have a valid cached positive result
-      if cache.last_scan.elapsed() < Self::TTL
-        && let Some(ref app) = cache.excluded_app
-      {
-        // Verify the cached app is still in the exclusion list
-        if app_matches_exclusion(app, excluded_apps) {
-          return Some(app.clone());
-        }
-      }
-
-      // No valid cache, scan and only cache positive results
-      let result = get_recently_active_excluded_app_uncached(excluded_apps);
-      if result.is_some() {
-        cache.last_scan = Instant::now();
-        cache.excluded_app = result.clone();
-      } else {
-        // Don't cache negative results. We expire cache immediately so next
-        // call will rescan. This ensures we don't miss exclusions when user
-        // switches from non-excluded to excluded app.
-        cache.last_scan = Instant::now().checked_sub(Self::TTL).unwrap();
-        cache.excluded_app = None;
-      }
-      result
-    } else {
-      // Lock poisoned - fall back to uncached
-      get_recently_active_excluded_app_uncached(excluded_apps)
-    }
-  }
-}
 
 use base64::prelude::*;
 use log::{debug, error, info, warn};
@@ -78,6 +20,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use unicode_width::UnicodeWidthChar;
+
+use crate::hash::Fnv1aHasher;
 
 pub const DEFAULT_MAX_ENTRY_SIZE: usize = 5_000_000;
 
@@ -174,54 +118,58 @@ impl ListQueryBuilder {
 
 #[derive(Error, Debug)]
 pub enum StashError {
-  #[error("Input is empty or too large, skipping store.")]
+  #[error("input is empty or too large, skipping store")]
   EmptyOrTooLarge,
-  #[error("Input is all whitespace, skipping store.")]
+  #[error("input is all whitespace, skipping store")]
   AllWhitespace,
-  #[error("Entry too small (min size: {0} bytes), skipping store.")]
+  #[error("entry too small (min size: {0} bytes), skipping store")]
   TooSmall(usize),
-  #[error("Entry too large (max size: {0} bytes), skipping store.")]
+  #[error("entry too large (max size: {0} bytes), skipping store")]
   TooLarge(usize),
 
-  #[error("Failed to store entry: {0}")]
+  #[error("failed to store entry: {0}")]
   Store(Box<str>),
-  #[error("Entry excluded by app filter: {0}")]
+  #[error("entry excluded by app filter: {0}")]
   ExcludedByApp(Box<str>),
-  #[error("Error reading entry during deduplication: {0}")]
+  #[error("error reading entry during deduplication: {0}")]
   DeduplicationRead(Box<str>),
-  #[error("Error decoding entry during deduplication: {0}")]
+  #[error("error decoding entry during deduplication: {0}")]
   DeduplicationDecode(Box<str>),
-  #[error("Failed to remove entry during deduplication: {0}")]
+  #[error("failed to remove entry during deduplication: {0}")]
   DeduplicationRemove(Box<str>),
-  #[error("Failed to trim entry: {0}")]
+  #[error("failed to trim entry: {0}")]
   Trim(Box<str>),
-  #[error("No entries to delete")]
+  #[error("no entries to delete")]
   NoEntriesToDelete,
-  #[error("Failed to delete last entry: {0}")]
+  #[error("failed to delete last entry: {0}")]
   DeleteLast(Box<str>),
-  #[error("Failed to wipe database: {0}")]
+  #[error("failed to wipe database: {0}")]
   Wipe(Box<str>),
-  #[error("Failed to decode entry during list: {0}")]
+  #[error("failed to decode entry during list: {0}")]
   ListDecode(Box<str>),
-  #[error("Failed to read input for decode: {0}")]
+  #[error("failed to read input for decode: {0}")]
   DecodeRead(Box<str>),
-  #[error("Failed to extract id for decode: {0}")]
+  #[error("failed to extract id for decode: {0}")]
   DecodeExtractId(Box<str>),
-  #[error("Failed to get entry for decode: {0}")]
+  #[error("failed to get entry for decode: {0}")]
   DecodeGet(Box<str>),
 
-  #[error("Failed to write decoded entry: {0}")]
+  #[error("failed to write decoded entry: {0}")]
   DecodeWrite(Box<str>),
-  #[error("Failed to delete entry during query delete: {0}")]
+  #[error("failed to delete entry during query delete: {0}")]
   QueryDelete(Box<str>),
-  #[error("Failed to delete entry with id {0}: {1}")]
+  #[error("failed to read delete input: {0}")]
+  DeleteInput(Box<str>),
+  #[error("failed to delete entry with id {0}: {1}")]
   DeleteEntry(i64, Box<str>),
 
-  #[error("Encryption error: {0}")]
+  #[cfg(feature = "encryption")]
+  #[error("encryption error: {0}")]
   Encryption(Box<str>),
-  #[error("Decryption error: {0}")]
+  #[cfg(feature = "encryption")]
+  #[error("decryption error: {0}")]
   Decryption(Box<str>),
-  #[error("Entry excluded by password manager hint")]
+  #[error("entry excluded by password manager hint")]
   SensitiveMimeHint,
 }
 
@@ -288,7 +236,10 @@ pub trait ClipboardDb {
   /// * `max_size` - Maximum content size
   /// * `content_hash` - Optional pre-computed content hash (avoids re-hashing)
   /// * `mime_types` - Optional list of all MIME types offered (for persistence)
-  #[allow(clippy::too_many_arguments)]
+  #[expect(
+    clippy::too_many_arguments,
+    reason = "store options mirror CLI and watch inputs"
+  )]
   fn store_entry(
     &self,
     input: impl Read,
@@ -354,43 +305,43 @@ impl SqliteClipboardDb {
     db_path: PathBuf,
   ) -> Result<Self, StashError> {
     conn
-      .pragma_update(None, "synchronous", "OFF")
+      .pragma_update(None, "journal_mode", "WAL")
       .map_err(|e| {
         StashError::Store(
-          format!("Failed to set synchronous pragma: {e}").into(),
+          format!("failed to set journal_mode pragma: {e}").into(),
         )
       })?;
     conn
-      .pragma_update(None, "journal_mode", "MEMORY")
+      .pragma_update(None, "synchronous", "NORMAL")
       .map_err(|e| {
         StashError::Store(
-          format!("Failed to set journal_mode pragma: {e}").into(),
+          format!("failed to set synchronous pragma: {e}").into(),
         )
       })?;
     conn.pragma_update(None, "cache_size", "-256") // 256KB cache
-      .map_err(|e| StashError::Store(format!("Failed to set cache_size pragma: {e}").into()))?;
+      .map_err(|e| StashError::Store(format!("failed to set cache_size pragma: {e}").into()))?;
     conn
       .pragma_update(None, "temp_store", "memory")
       .map_err(|e| {
         StashError::Store(
-          format!("Failed to set temp_store pragma: {e}").into(),
+          format!("failed to set temp_store pragma: {e}").into(),
         )
       })?;
     conn.pragma_update(None, "mmap_size", "0") // disable mmap
-      .map_err(|e| StashError::Store(format!("Failed to set mmap_size pragma: {e}").into()))?;
+      .map_err(|e| StashError::Store(format!("failed to set mmap_size pragma: {e}").into()))?;
     conn.pragma_update(None, "page_size", "512") // small(er) pages
-      .map_err(|e| StashError::Store(format!("Failed to set page_size pragma: {e}").into()))?;
+      .map_err(|e| StashError::Store(format!("failed to set page_size pragma: {e}").into()))?;
 
     let tx = conn.transaction().map_err(|e| {
       StashError::Store(
-        format!("Failed to begin migration transaction: {e}").into(),
+        format!("failed to begin migration transaction: {e}").into(),
       )
     })?;
 
     let schema_version: i64 = tx
       .pragma_query_value(None, "user_version", |row| row.get(0))
       .map_err(|e| {
-        StashError::Store(format!("Failed to read schema version: {e}").into())
+        StashError::Store(format!("failed to read schema version: {e}").into())
       })?;
 
     if schema_version == 0 {
@@ -481,7 +432,7 @@ impl SqliteClipboardDb {
 
     tx.commit().map_err(|e| {
       StashError::Store(
-        format!("Failed to commit migration transaction: {e}").into(),
+        format!("failed to commit migration transaction: {e}").into(),
       )
     })?;
 
@@ -602,7 +553,10 @@ impl ClipboardDb for SqliteClipboardDb {
     let content_hash = content_hash.unwrap_or_else(|| {
       let mut hasher = Fnv1aHasher::new();
       hasher.write(&buf);
-      #[allow(clippy::cast_possible_wrap)]
+      #[expect(
+        clippy::cast_possible_wrap,
+        reason = "stored hash preserves the u64 bit pattern in sqlite"
+      )]
       let hash = hasher.finish() as i64;
       hash
     });
@@ -616,16 +570,16 @@ impl ClipboardDb for SqliteClipboardDb {
       if let Ok(s) = std::str::from_utf8(&buf)
         && re.is_match(s)
       {
-        warn!("Clipboard entry matches sensitive regex, skipping store.");
-        return Err(StashError::Store("Filtered by sensitive regex".into()));
+        warn!("clipboard entry matches sensitive regex, skipping store");
+        return Err(StashError::Store("filtered by sensitive regex".into()));
       }
     }
 
     // Check if clipboard should be excluded based on running apps
     if should_exclude_by_app(excluded_apps) {
-      warn!("Clipboard entry excluded by app filter");
+      warn!("clipboard entry excluded by app filter");
       return Err(StashError::ExcludedByApp(
-        "Clipboard entry from excluded app".into(),
+        "clipboard entry from excluded app".into(),
       ));
     }
 
@@ -659,10 +613,7 @@ impl ClipboardDb for SqliteClipboardDb {
           contents_to_store,
           mime,
           content_hash,
-          std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("Time went backwards")
-            .as_secs() as i64,
+          Self::now() as i64,
           mime_types_json
         ],
       )
@@ -721,13 +672,12 @@ impl ClipboardDb for SqliteClipboardDb {
     if count > max_i64 {
       let to_delete = count - max_i64;
 
-      #[allow(clippy::useless_conversion)]
       self
         .conn
         .execute(
           "DELETE FROM clipboard WHERE id IN (SELECT id FROM clipboard ORDER \
            BY COALESCE(last_accessed, 0) ASC, id ASC LIMIT ?1)",
-          params![i64::try_from(to_delete).unwrap_or(i64::MAX)],
+          params![to_delete],
         )
         .map_err(|e| StashError::Trim(e.to_string().into()))?;
     }
@@ -849,41 +799,47 @@ impl ClipboardDb for SqliteClipboardDb {
   }
 
   fn delete_query(&self, query: &str) -> Result<usize, StashError> {
+    if query.is_empty() {
+      return Err(StashError::QueryDelete("query must not be empty".into()));
+    }
+
+    let escaped = query
+      .replace('!', "!!")
+      .replace('%', "!%")
+      .replace('_', "!_");
+    let pattern = format!("%{escaped}%");
     let mut stmt = self
       .conn
-      .prepare("SELECT id, contents FROM clipboard")
+      .prepare(
+        "SELECT id FROM clipboard WHERE LOWER(CAST(contents AS TEXT)) LIKE \
+         LOWER(?1) ESCAPE '!'",
+      )
       .map_err(|e| StashError::QueryDelete(e.to_string().into()))?;
     let mut rows = stmt
-      .query([])
+      .query([pattern])
       .map_err(|e| StashError::QueryDelete(e.to_string().into()))?;
-    let mut deleted = 0;
+    let mut ids = Vec::new();
+
     while let Some(row) = rows
       .next()
       .map_err(|e| StashError::QueryDelete(e.to_string().into()))?
     {
-      let id: i64 = row
-        .get(0)
+      ids.push(
+        row
+          .get::<_, i64>(0)
+          .map_err(|e| StashError::QueryDelete(e.to_string().into()))?,
+      );
+    }
+    drop(rows);
+    drop(stmt);
+
+    let mut deleted = 0;
+    for id in ids {
+      self
+        .conn
+        .execute("DELETE FROM clipboard WHERE id = ?1", params![id])
         .map_err(|e| StashError::QueryDelete(e.to_string().into()))?;
-      let contents: Vec<u8> = row
-        .get(1)
-        .map_err(|e| StashError::QueryDelete(e.to_string().into()))?;
-      let plaintext = match EntryEncoding::classify(contents).decode() {
-        Ok(p) => p,
-        Err(e) => {
-          warn!("skipping entry {id}: {e}");
-          continue;
-        },
-      };
-      if plaintext
-        .windows(query.len())
-        .any(|w| w == query.as_bytes())
-      {
-        self
-          .conn
-          .execute("DELETE FROM clipboard WHERE id = ?1", params![id])
-          .map_err(|e| StashError::QueryDelete(e.to_string().into()))?;
-        deleted += 1;
-      }
+      deleted += 1;
     }
     Ok(deleted)
   }
@@ -891,14 +847,19 @@ impl ClipboardDb for SqliteClipboardDb {
   fn delete_entries(&self, in_: impl Read) -> Result<usize, StashError> {
     let reader = BufReader::new(in_);
     let mut deleted = 0;
-    for line in reader.lines().map_while(Result::ok) {
-      if let Ok(id) = extract_id(&line) {
-        self
-          .conn
-          .execute("DELETE FROM clipboard WHERE id = ?1", params![id])
-          .map_err(|e| StashError::DeleteEntry(id, e.to_string().into()))?;
-        deleted += 1;
+    for line in reader.lines() {
+      let line =
+        line.map_err(|e| StashError::DeleteInput(e.to_string().into()))?;
+      if line.trim().is_empty() {
+        continue;
       }
+      let id =
+        extract_id(&line).map_err(|e| StashError::DeleteInput(e.into()))?;
+      self
+        .conn
+        .execute("DELETE FROM clipboard WHERE id = ?1", params![id])
+        .map_err(|e| StashError::DeleteEntry(id, e.to_string().into()))?;
+      deleted += 1;
     }
     Ok(deleted)
   }
@@ -1019,8 +980,7 @@ impl SqliteClipboardDb {
   pub fn now() -> f64 {
     std::time::SystemTime::now()
       .duration_since(std::time::UNIX_EPOCH)
-      .unwrap()
-      .as_secs_f64()
+      .map_or(0.0, |duration| duration.as_secs_f64())
   }
 
   /// Clean up all expired entries. Returns count deleted.
@@ -1154,14 +1114,14 @@ impl SqliteClipboardDb {
 
     let db_path = self.db_path.display();
     Ok(format!(
-      "Database Statistics:\n\nEntries:\nTotal:          \
-       {total}\nActive:         {active}\nExpired:        \
-       {expired}\nWith TTL:       \
-       {with_expiration}\nEncrypted:      \
-       {encrypted}\nUndecryptable:  \
-       {undecryptable}\n\nStorage:\nPath:           \
-       {db_path}\nSize:           {size_mb:.2} MB \
-       ({size_bytes} bytes)\nPages:          {page_count}\nPage size:      \
+      "database statistics:\n\nentries:\ntotal:          \
+       {total}\nactive:         {active}\nexpired:        \
+       {expired}\nwith ttl:       \
+       {with_expiration}\nencrypted:      \
+       {encrypted}\nundecryptable:  \
+       {undecryptable}\n\nstorage:\npath:           \
+       {db_path}\nsize:           {size_mb:.2} MB \
+       ({size_bytes} bytes)\npages:          {page_count}\npage size:      \
        {page_size} bytes"
     ))
   }
@@ -1325,7 +1285,7 @@ pub fn preview_entry(data: &[u8], mime: Option<&str>, width: u32) -> String {
   }
 
   // Shouldn't reach here if MIME is properly set, but just in case
-  info!("Mimetype sniffing failed, omitting");
+  info!("mimetype sniffing failed, omitting");
   format!("[[ binary data {} ]]", size_str(data.len()))
 }
 
@@ -1334,7 +1294,7 @@ pub fn size_str(size: usize) -> String {
   let mut fsize = if let Ok(val) = u32::try_from(size) {
     f64::from(val)
   } else {
-    error!("Clipboard entry size too large for display: {size}");
+    error!("clipboard entry size too large for display: {size}");
     f64::from(u32::MAX)
   };
   let mut i = 0;
@@ -1345,8 +1305,7 @@ pub fn size_str(size: usize) -> String {
   format!("{:.0} {}", fsize, units[i])
 }
 
-/// Check if clipboard should be excluded based on excluded apps configuration.
-/// Uses timing correlation and focused window detection to identify source app.
+/// Check if clipboard should be excluded based on the focused app.
 fn should_exclude_by_app(excluded_apps: Option<&[String]>) -> bool {
   match excluded_apps {
     Some(apps) if !apps.is_empty() => detect_excluded_app_activity(apps),
@@ -1354,31 +1313,21 @@ fn should_exclude_by_app(excluded_apps: Option<&[String]>) -> bool {
   }
 }
 
-/// Detect if clipboard likely came from an excluded app using multiple
-/// strategies.
+/// Detect if clipboard came from an excluded focused app.
 fn detect_excluded_app_activity(excluded_apps: &[String]) -> bool {
-  debug!("Checking clipboard exclusion against: {excluded_apps:?}");
+  debug!("checking clipboard exclusion against: {excluded_apps:?}");
 
-  // Strategy 1: Check focused window (compositor-dependent)
   if let Some(focused_app) = get_focused_window_app() {
-    debug!("Focused window detected: {focused_app}");
+    debug!("focused window detected: {focused_app}");
     if app_matches_exclusion(&focused_app, excluded_apps) {
-      debug!("Clipboard excluded: focused window matches {focused_app}");
+      debug!("clipboard excluded: focused window matches {focused_app}");
       return true;
     }
   } else {
-    debug!("No focused window detected");
+    debug!("no focused window detected");
   }
 
-  // Strategy 2: Check recently active processes (timing correlation)
-  // Use cached results to avoid expensive /proc scanning
-  if let Some(active_app) = ProcessCache::get(excluded_apps) {
-    debug!("Clipboard excluded: recent activity from {active_app}");
-    return true;
-  }
-  debug!("No recently active excluded apps found");
-
-  debug!("Clipboard not excluded");
+  debug!("clipboard not excluded");
   false
 }
 
@@ -1394,125 +1343,23 @@ fn get_focused_window_app() -> Option<String> {
   if let Ok(client) = env::var("WAYLAND_CLIENT_NAME")
     && !client.is_empty()
   {
-    debug!("Found WAYLAND_CLIENT_NAME: {client}");
+    debug!("found WAYLAND_CLIENT_NAME: {client}");
     return Some(client);
   }
 
-  debug!("No focused window detection method worked");
+  debug!("no focused window detection method worked");
   None
-}
-
-/// Check for recently active excluded apps using CPU and I/O activity.
-/// This is the uncached version - use `ProcessCache::get()` for cached access.
-fn get_recently_active_excluded_app_uncached(
-  excluded_apps: &[String],
-) -> Option<String> {
-  let proc_dir = std::path::Path::new("/proc");
-  if !proc_dir.exists() {
-    return None;
-  }
-
-  let mut candidates = Vec::new();
-
-  if let Ok(entries) = std::fs::read_dir(proc_dir) {
-    for entry in entries.flatten() {
-      if let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>()
-        && let Ok(comm) = fs::read_to_string(format!("/proc/{pid}/comm"))
-      {
-        let process_name = comm.trim();
-
-        // Check process name against exclusion list
-        if app_matches_exclusion(process_name, excluded_apps)
-          && has_recent_activity(pid)
-        {
-          candidates
-            .push((process_name.to_string(), get_process_activity_score(pid)));
-        }
-      }
-    }
-  }
-
-  // Return the most active excluded app
-  candidates
-    .into_iter()
-    .max_by_key(|(_, score)| *score)
-    .map(|(name, _)| name)
-}
-
-/// Check if a process has had recent activity (simple heuristic).
-fn has_recent_activity(pid: u32) -> bool {
-  // Check /proc/PID/stat for recent CPU usage
-  if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
-    let fields: Vec<&str> = stat.split_whitespace().collect();
-    if fields.len() > 14 {
-      // Fields 14 and 15 are utime and stime
-      if let (Ok(utime), Ok(stime)) =
-        (fields[13].parse::<u64>(), fields[14].parse::<u64>())
-      {
-        let total_time = utime + stime;
-        // Simple heuristic: if process has any significant CPU time, consider
-        // it active
-        return total_time > 100; // arbitrary threshold
-      }
-    }
-  }
-
-  // Check /proc/PID/io for recent I/O activity
-  if let Ok(io_stats) = fs::read_to_string(format!("/proc/{pid}/io")) {
-    for line in io_stats.lines() {
-      if (line.starts_with("write_bytes:") || line.starts_with("read_bytes:"))
-        && let Some(value_str) = line.split(':').nth(1)
-        && let Ok(value) = value_str.trim().parse::<u64>()
-        && value > 1024 * 1024
-      {
-        // 1MB threshold
-        return true;
-      }
-    }
-  }
-
-  false
-}
-
-/// Get a simple activity score for process prioritization.
-fn get_process_activity_score(pid: u32) -> u64 {
-  let mut score = 0;
-
-  // Add CPU time to score
-  if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
-    let fields: Vec<&str> = stat.split_whitespace().collect();
-    if fields.len() > 14
-      && let (Ok(utime), Ok(stime)) =
-        (fields[13].parse::<u64>(), fields[14].parse::<u64>())
-    {
-      score += utime + stime;
-    }
-  }
-
-  // Add I/O activity to score
-  if let Ok(io_stats) = fs::read_to_string(format!("/proc/{pid}/io")) {
-    for line in io_stats.lines() {
-      if (line.starts_with("write_bytes:") || line.starts_with("read_bytes:"))
-        && let Some(value_str) = line.split(':').nth(1)
-        && let Ok(value) = value_str.trim().parse::<u64>()
-      {
-        score += value / 1024; // convert to KB
-      }
-    }
-  }
-
-  score
 }
 
 /// Check if an app name matches any in the exclusion list.
 /// Supports basic string matching and simple regex patterns.
 fn app_matches_exclusion(app_name: &str, excluded_apps: &[String]) -> bool {
-  debug!("Checking if '{app_name}' matches exclusion list: {excluded_apps:?}");
+  debug!("checking if '{app_name}' matches exclusion list: {excluded_apps:?}");
 
   for excluded in excluded_apps {
     // Basic string matching (case-insensitive)
     if app_name.to_lowercase() == excluded.to_lowercase() {
-      debug!("Matched exact string: {app_name} == {excluded}");
+      debug!("matched exact string: {app_name} == {excluded}");
       return true;
     }
 
@@ -1521,7 +1368,7 @@ fn app_matches_exclusion(app_name: &str, excluded_apps: &[String]) -> bool {
       // Exact match pattern like ^AppName$
       let pattern = &excluded[1..excluded.len() - 1];
       if app_name == pattern {
-        debug!("Matched exact pattern: {app_name} == {pattern}");
+        debug!("matched exact pattern: {app_name} == {pattern}");
         return true;
       }
     } else if excluded.contains('*') {
@@ -1530,13 +1377,13 @@ fn app_matches_exclusion(app_name: &str, excluded_apps: &[String]) -> bool {
       if let Ok(regex) = regex::Regex::new(&pattern)
         && regex.is_match(app_name)
       {
-        debug!("Matched wildcard pattern: {app_name} matches {excluded}");
+        debug!("matched wildcard pattern: {app_name} matches {excluded}");
         return true;
       }
     }
   }
 
-  debug!("No match found for '{app_name}'");
+  debug!("no match found for '{app_name}'");
   false
 }
 

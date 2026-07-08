@@ -117,7 +117,7 @@ impl AsyncClipboardDb {
 
   fn open_db_internal(path: &PathBuf) -> Result<SqliteClipboardDb, StashError> {
     let conn = rusqlite::Connection::open(path).map_err(|e| {
-      StashError::Store(format!("Failed to open database: {e}").into())
+      StashError::Store(format!("failed to open database: {e}").into())
     })?;
     SqliteClipboardDb::new(conn, path.clone())
   }
