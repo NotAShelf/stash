@@ -5,6 +5,17 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::db::{ClipboardDb, SqliteClipboardDb, StashError};
 
+#[cfg(feature = "notifications")]
+fn notify(summary: &str, body: &str) {
+  let _ = notify_rust::Notification::new()
+    .summary(summary)
+    .body(body)
+    .show();
+}
+
+#[cfg(not(feature = "notifications"))]
+fn notify(_summary: &str, _body: &str) {}
+
 pub trait ListCommand {
   fn list(
     &self,
@@ -60,6 +71,12 @@ struct TuiState {
 
   /// ID of entry currently being copied.
   copying_entry: Option<i64>,
+
+  /// Entry waiting for a second delete keypress.
+  pending_delete: Option<i64>,
+
+  /// Short status text shown in the TUI title.
+  status: Option<String>,
 }
 
 impl TuiState {
@@ -95,6 +112,8 @@ impl TuiState {
       search_mode: false,
       reverse,
       copying_entry: None,
+      pending_delete: None,
+      status: None,
     })
   }
 
@@ -115,6 +134,8 @@ impl TuiState {
       self.cursor = 0;
       self.viewport_offset = 0;
       self.dirty = true;
+      self.pending_delete = None;
+      self.status = None;
     }
     changed
   }
@@ -129,6 +150,8 @@ impl TuiState {
       self.viewport_offset = 0;
       self.dirty = true;
     }
+    self.pending_delete = None;
+    self.status = None;
     had_search
   }
 
@@ -140,6 +163,8 @@ impl TuiState {
       // or start fresh
       self.search_query.clear();
       self.dirty = true;
+      self.pending_delete = None;
+      self.status = None;
     }
   }
 
@@ -168,6 +193,8 @@ impl TuiState {
     } else {
       self.cursor + 1
     };
+    self.pending_delete = None;
+    self.status = None;
   }
 
   /// Move the cursor up by one, wrapping to `total - 1` at the top.
@@ -180,6 +207,8 @@ impl TuiState {
     } else {
       self.cursor - 1
     };
+    self.pending_delete = None;
+    self.status = None;
   }
 
   /// Resize the window (e.g. terminal resized).  Marks dirty so the
@@ -188,6 +217,7 @@ impl TuiState {
     if new_size != self.window_size {
       self.window_size = new_size;
       self.dirty = true;
+      self.pending_delete = None;
     }
   }
 
@@ -272,7 +302,10 @@ fn global_column_widths(
 }
 
 impl SqliteClipboardDb {
-  #[allow(clippy::too_many_lines)]
+  #[expect(
+    clippy::too_many_lines,
+    reason = "ratatui event loop and rendering share local state"
+  )]
   pub fn list_tui(
     &self,
     preview_width: u32,
@@ -298,7 +331,6 @@ impl SqliteClipboardDb {
         enable_raw_mode,
       },
     };
-    use notify_rust::Notification;
     use ratatui::{
       Terminal,
       backend::CrosstermBackend,
@@ -449,6 +481,8 @@ impl SqliteClipboardDb {
             // Build title based on search state
             let title = if tui.search_mode {
               format!("Search: {}", tui.search_query)
+            } else if let Some(status) = &tui.status {
+              status.clone()
             } else if tui.search_query.is_empty() {
               "Clipboard Entries (j/k/↑/↓ to move, / to search, Enter to copy, \
                Shift+D to delete, q/ESC to quit)"
@@ -466,7 +500,8 @@ impl SqliteClipboardDb {
             let border_width = 2;
             let highlight_symbol = ">";
             let highlight_width = 1;
-            let content_width = area.width as usize - border_width;
+            let content_width =
+              (area.width as usize).saturating_sub(border_width);
 
             let min_id_width = 2;
             let min_mime_width = 6;
@@ -666,20 +701,24 @@ impl SqliteClipboardDb {
             if actions.delete
               && let Some(&(id, ..)) = tui.selected_entry()
             {
-              self
-                .conn
-                .execute(
-                  "DELETE FROM clipboard WHERE id = ?1",
-                  rusqlite::params![id],
-                )
-                .map_err(|e| {
-                  StashError::DeleteEntry(id, e.to_string().into())
-                })?;
-              tui.on_delete();
-              let _ = Notification::new()
-                .summary("Stash")
-                .body("Deleted entry")
-                .show();
+              if tui.pending_delete == Some(id) {
+                self
+                  .conn
+                  .execute(
+                    "DELETE FROM clipboard WHERE id = ?1",
+                    rusqlite::params![id],
+                  )
+                  .map_err(|e| {
+                    StashError::DeleteEntry(id, e.to_string().into())
+                  })?;
+                tui.on_delete();
+                tui.status = Some(format!("deleted entry {id}"));
+                notify("stash", "deleted entry");
+              } else {
+                tui.pending_delete = Some(id);
+                tui.status =
+                  Some(format!("press shift+d again to delete entry {id}"));
+              }
             }
 
             if actions.copy
@@ -687,10 +726,12 @@ impl SqliteClipboardDb {
             {
               if tui.copying_entry == Some(id) {
                 log::debug!(
-                  "Skipping duplicate copy for entry {id} (already in \
+                  "skipping duplicate copy for entry {id} (already in \
                    progress)"
                 );
               } else {
+                tui.pending_delete = None;
+                tui.status = None;
                 tui.copying_entry = Some(id);
                 match self.copy_entry(id) {
                   Ok((new_id, contents, mime)) => {
@@ -707,26 +748,22 @@ impl SqliteClipboardDb {
                       .copy(Source::Bytes(contents.clone().into()), mime_type);
                     match copy_result {
                       Ok(()) => {
-                        let _ = Notification::new()
-                          .summary("Stash")
-                          .body("Copied entry to clipboard")
-                          .show();
+                        tui.status = Some(format!("copied entry {id}"));
+                        notify("stash", "copied entry to clipboard");
                       },
                       Err(e) => {
                         log::error!("failed to copy entry to clipboard: {e}");
-                        let _ = Notification::new()
-                          .summary("Stash")
-                          .body(&format!("Failed to copy to clipboard: {e}"))
-                          .show();
+                        let body = format!("failed to copy to clipboard: {e}");
+                        tui.status = Some(body.clone());
+                        notify("stash", &body);
                       },
                     }
                   },
                   Err(e) => {
                     log::error!("failed to fetch entry {id}: {e}");
-                    let _ = Notification::new()
-                      .summary("Stash")
-                      .body(&format!("Failed to fetch entry: {e}"))
-                      .show();
+                    let body = format!("failed to fetch entry: {e}");
+                    tui.status = Some(body.clone());
+                    notify("stash", &body);
                   },
                 }
                 tui.copying_entry = None;
