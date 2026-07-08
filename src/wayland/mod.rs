@@ -26,7 +26,7 @@ static TOPLEVEL_APPS: LazyLock<Mutex<HashMap<ObjectId, String>>> =
 pub fn init_wayland_state() {
   std::thread::spawn(|| {
     if let Err(e) = run_wayland_event_loop() {
-      debug!("Wayland event loop error: {e}");
+      debug!("wayland event loop error: {e}");
     }
   });
 }
@@ -36,11 +36,11 @@ pub fn get_focused_window_app() -> Option<String> {
   // Load the focused app using lock-free arc-swap
   let focused = FOCUSED_APP.load();
   if let Some(app) = focused.as_ref() {
-    debug!("Found focused app via Wayland protocol: {app}");
+    debug!("found focused app via wayland protocol: {app}");
     return Some(app.to_string());
   }
 
-  debug!("No focused window detection method worked");
+  debug!("no focused window detection method worked");
   None
 }
 
@@ -49,7 +49,7 @@ fn run_wayland_event_loop() -> Result<(), Box<dyn std::error::Error>> {
   let conn = match WaylandConnection::connect_to_env() {
     Ok(conn) => conn,
     Err(e) => {
-      debug!("Failed to connect to Wayland: {e}");
+      debug!("failed to connect to wayland: {e}");
       return Ok(());
     },
   };
@@ -135,7 +135,7 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for AppState {
 
     match event {
       zwlr_foreign_toplevel_handle_v1::Event::AppId { app_id } => {
-        debug!("Toplevel app_id: {app_id}");
+        debug!("toplevel app_id: {app_id}");
         // Store the app_id for this handle
         if let Ok(mut apps) = TOPLEVEL_APPS.lock() {
           apps.insert(handle_id, app_id);
@@ -150,12 +150,12 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for AppState {
         if states.chunks_exact(4).any(|chunk| {
           u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) == 2
         }) {
-          debug!("Toplevel activated");
+          debug!("toplevel activated");
           // Update focused app to the `app_id` of this handle
           if let Ok(apps) = TOPLEVEL_APPS.lock()
             && let Some(app_id) = apps.get(&handle_id)
           {
-            debug!("Setting focused app to: {app_id}");
+            debug!("setting focused app to: {app_id}");
             FOCUSED_APP.store(Some(Arc::new(app_id.clone())));
           }
         }
