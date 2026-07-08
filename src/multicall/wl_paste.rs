@@ -13,6 +13,7 @@ use std::{
 
 use clap::{ArgAction, Parser};
 use color_eyre::eyre::{Context, Result, bail};
+use log::LevelFilter;
 use wl_clipboard_rs::paste::{
   ClipboardType as PasteClipboardType,
   Error as PasteError,
@@ -73,6 +74,16 @@ fn get_paste_mime_type(mime_arg: Option<&str>) -> PasteMimeType<'_> {
   }
 }
 
+fn init_logger(verbose: u8) {
+  let level = match verbose {
+    0 => LevelFilter::Warn,
+    1 => LevelFilter::Info,
+    2 => LevelFilter::Debug,
+    _ => LevelFilter::Trace,
+  };
+  let _ = env_logger::Builder::new().filter_level(level).try_init();
+}
+
 fn handle_list_types(
   clipboard: PasteClipboardType,
   seat: PasteSeat,
@@ -83,8 +94,7 @@ fn handle_list_types(
         println!("{mime_type}");
       }
 
-      #[allow(clippy::needless_return)]
-      return Ok(());
+      Ok(())
     },
     Err(PasteError::NoSeats) => {
       bail!("no seats available (is a Wayland compositor running?)");
@@ -144,7 +154,11 @@ fn handle_watch_mode(
     }
 
     // Get current clipboard content
-    let current_hash = match get_clipboard_content_hash(clipboard, seat) {
+    let current_hash = match get_clipboard_content_hash(
+      clipboard,
+      seat,
+      args.mime_type.as_deref(),
+    ) {
       Ok(hash) => hash,
       Err(e) => {
         log::error!("failed to get clipboard content hash: {e}");
@@ -169,7 +183,12 @@ fn handle_watch_mode(
             log::info!("clipboard content changed, executing watch command");
 
             // Execute the watch command
-            if let Err(e) = execute_watch_command(watch_args, clipboard, seat) {
+            if let Err(e) = execute_watch_command(
+              watch_args,
+              clipboard,
+              seat,
+              args.mime_type.as_deref(),
+            ) {
               log::error!("failed to execute watch command: {e}");
               // Continue watching even if command fails
             }
@@ -191,8 +210,9 @@ fn handle_watch_mode(
 fn get_clipboard_content_hash(
   clipboard: PasteClipboardType,
   seat: PasteSeat,
+  mime_arg: Option<&str>,
 ) -> Result<u64> {
-  match get_contents(clipboard, seat, PasteMimeType::Text) {
+  match get_contents(clipboard, seat, get_paste_mime_type(mime_arg)) {
     Ok((mut reader, _types)) => {
       let mut content = Vec::new();
       let mut temp_buffer = [0; 8192];
@@ -227,24 +247,11 @@ fn get_clipboard_content_hash(
   }
 }
 
-/// Validate command name to prevent command injection
+/// Validate command name.
 fn validate_command_name(cmd: &str) -> Result<()> {
   if cmd.is_empty() {
     bail!("command name cannot be empty");
   }
-
-  // Reject commands with shell metacharacters or path traversal
-  if cmd.contains(|c| {
-    ['|', '&', ';', '$', '`', '(', ')', '<', '>', '"', '\'', '\\'].contains(&c)
-  }) {
-    bail!("command contains invalid characters: {cmd}");
-  }
-
-  // Reject absolute paths and relative path traversal
-  if cmd.starts_with('/') || cmd.contains("..") {
-    bail!("command paths are not allowed: {cmd}");
-  }
-
   Ok(())
 }
 
@@ -257,7 +264,8 @@ fn set_clipboard_state_env(has_content: bool) -> Result<()> {
     bail!("invalid clipboard state value: {value}");
   }
 
-  // Safe to set environment variable with validated, known-safe value
+  // SAFETY: watch mode is single-threaded here and mutates the environment
+  // immediately before spawning the child command.
   unsafe {
     std::env::set_var("STASH_CLIPBOARD_STATE", value);
   }
@@ -268,6 +276,7 @@ fn execute_watch_command(
   watch_args: &[String],
   clipboard: PasteClipboardType,
   seat: PasteSeat,
+  mime_arg: Option<&str>,
 ) -> Result<()> {
   if watch_args.is_empty() {
     bail!("watch command cannot be empty");
@@ -282,7 +291,7 @@ fn execute_watch_command(
   }
 
   // Get clipboard content and pipe it to the command
-  match get_contents(clipboard, seat, PasteMimeType::Text) {
+  match get_contents(clipboard, seat, get_paste_mime_type(mime_arg)) {
     Ok((mut reader, _types)) => {
       let mut content = Vec::new();
       let mut temp_buffer = [0; 8192];
@@ -474,11 +483,14 @@ fn handle_regular_paste(
           || types == "application/x-sh"
       };
 
-      if !args.no_newline && is_text_content && !buf.ends_with(b"\n")
+      if !args.no_newline
+        && is_text_content
+        && !buf.ends_with(b"\n")
         && let Err(e) = out.write_all(b"\n")
-          && e.kind() != io::ErrorKind::BrokenPipe {
-            bail!("failed to write newline to stdout: {e}");
-          }
+        && e.kind() != io::ErrorKind::BrokenPipe
+      {
+        bail!("failed to write newline to stdout: {e}");
+      }
     },
     Err(PasteError::NoSeats) => {
       bail!("no seats available (is a Wayland compositor running?)");
@@ -502,6 +514,7 @@ fn handle_regular_paste(
 
 pub fn wl_paste_main() -> Result<()> {
   let args = WlPasteArgs::parse();
+  init_logger(args.verbose);
 
   let clipboard = if args.primary {
     PasteClipboardType::Primary

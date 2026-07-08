@@ -2,6 +2,7 @@ use std::io::{self, Read};
 
 use clap::{ArgAction, Parser};
 use color_eyre::eyre::{Context, Result, bail};
+use log::LevelFilter;
 use wl_clipboard_rs::{
   copy::{
     ClipboardType as CopyClipboardType,
@@ -23,7 +24,10 @@ const MAX_CLIPBOARD_SIZE: usize = 100 * 1024 * 1024;
   about = "Copy clipboard contents on Wayland.",
   version
 )]
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+  clippy::struct_excessive_bools,
+  reason = "clap mirrors wl-copy flags as booleans"
+)]
 struct WlCopyArgs {
   /// Serve only a single paste request and then exit
   #[arg(short = 'o', long = "paste-once", action = ArgAction::SetTrue)]
@@ -85,7 +89,7 @@ fn handle_check_primary() {
       0
     },
     Ok(false) => {
-      log::info!("primary selection is NOT supported.");
+      log::info!("primary selection is not supported.");
       1
     },
     Err(PrimarySelectionCheckError::NoSeats) => {
@@ -112,6 +116,16 @@ const fn get_clipboard_type(primary: bool) -> CopyClipboardType {
   } else {
     CopyClipboardType::Regular
   }
+}
+
+fn init_logger(verbose: u8) {
+  let level = match verbose {
+    0 => LevelFilter::Warn,
+    1 => LevelFilter::Info,
+    2 => LevelFilter::Debug,
+    _ => LevelFilter::Trace,
+  };
+  let _ = env_logger::Builder::new().filter_level(level).try_init();
 }
 
 fn get_mime_type(mime_arg: Option<&str>) -> CopyMimeType {
@@ -213,10 +227,9 @@ fn handle_clear_clipboard(
 }
 
 fn fork_and_serve(prepared_copy: wl_clipboard_rs::copy::PreparedCopy) {
-  // Use proper Unix fork() to create a child process that continues
-  // serving clipboard content after parent exits.
-  // XXX: I wanted to choose and approach without fork, but we could not
-  // ensure persistence after the thread dies. Alas, we gotta fork.
+  // Use fork so clipboard contents survive after the parent exits.
+  // SAFETY: after fork, the child only serves the prepared Wayland copy and
+  // exits; the parent exits immediately.
   unsafe {
     match libc::fork() {
       0 => {
@@ -242,12 +255,13 @@ fn fork_and_serve(prepared_copy: wl_clipboard_rs::copy::PreparedCopy) {
 
 pub fn wl_copy_main() -> Result<()> {
   let args = WlCopyArgs::parse();
+  init_logger(args.verbose);
 
   if args.check_primary {
     handle_check_primary();
   }
 
-  let clipboard = get_clipboard_type(args.primary);
+  let clipboard = get_clipboard_type(args.primary && !args.regular);
   let mime_type = get_mime_type(args.mime_type.as_deref());
 
   // Handle clear operation
