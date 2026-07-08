@@ -19,5 +19,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Build
-        run: cargo build --verbose
+      - name: Format
+        run: cargo fmt -- --check
+
+      - name: Check
+        run: cargo check
+
+      - name: Test
+        run: cargo test
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Check feature combinations
+        run: |
+          cargo check --no-default-features
+          cargo check --no-default-features --features notifications
+          cargo check --no-default-features --features encryption
+          cargo check --no-default-features --features use-toplevel
