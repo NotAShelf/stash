@@ -13,14 +13,12 @@ use std::{
 };
 
 use clap::{CommandFactory, Parser, Subcommand};
-use color_eyre::eyre;
+use color_eyre::eyre::{self, bail};
 use humantime::parse_duration;
 use inquire::Confirm;
 
-// While the module is named "wayland", the Wayland module is *strictly* for the
-// use-toplevel feature as it requires some low-level wayland crates that are
-// not required *by default*. The module is named that way because "toplevel"
-// sounded too silly. Stash is strictly a Wayland clipboard manager.
+// The Wayland module is only compiled for focused-window detection, which
+// depends on low-level compositor protocols.
 #[cfg(feature = "use-toplevel")] mod wayland;
 
 use crate::{
@@ -183,19 +181,6 @@ enum DbAction {
   Stats,
 }
 
-fn report_error<T>(
-  result: Result<T, impl std::fmt::Display>,
-  context: &str,
-) -> Option<T> {
-  match result {
-    Ok(val) => Some(val),
-    Err(e) => {
-      log::error!("{context}: {e}");
-      None
-    },
-  }
-}
-
 fn confirm(prompt: &str) -> bool {
   Confirm::new(prompt)
     .with_default(false)
@@ -206,7 +191,10 @@ fn confirm(prompt: &str) -> bool {
     })
 }
 
-#[allow(clippy::too_many_lines)] // whatever
+#[expect(
+  clippy::too_many_lines,
+  reason = "single-binary command dispatch is still clearer here"
+)]
 fn main() -> eyre::Result<()> {
   color_eyre::install()?;
 
@@ -238,6 +226,7 @@ fn main() -> eyre::Result<()> {
   // Normal CLI handling
   smol::block_on(async {
     let cli = Cli::parse();
+    let global_ask = cli.ask;
     env_logger::Builder::new()
       .filter_level(cli.verbosity.into())
       .init();
@@ -247,8 +236,8 @@ fn main() -> eyre::Result<()> {
       None => {
         let cache_dir = dirs::cache_dir().ok_or_else(|| {
           eyre::eyre!(
-            "Could not determine cache directory. Set --db-path or \
-             $STASH_DB_PATH explicitly."
+            "could not determine cache directory. set --db-path or \
+             $STASH_DB_PATH explicitly"
           )
         })?;
         cache_dir.join("stash").join("db")
@@ -265,21 +254,18 @@ fn main() -> eyre::Result<()> {
     match cli.command {
       Some(Command::Store) => {
         let state = env::var("STASH_CLIPBOARD_STATE").ok();
-        report_error(
-          db.store(
-            io::stdin(),
-            cli.max_dedupe_search,
-            cli.max_items,
-            state,
-            #[cfg(feature = "use-toplevel")]
-            &cli.excluded_apps,
-            #[cfg(not(feature = "use-toplevel"))]
-            &[],
-            cli.min_size,
-            cli.max_size,
-          ),
-          "failed to store entry",
-        );
+        db.store(
+          io::stdin(),
+          cli.max_dedupe_search,
+          cli.max_items,
+          state,
+          #[cfg(feature = "use-toplevel")]
+          &cli.excluded_apps,
+          #[cfg(not(feature = "use-toplevel"))]
+          &[],
+          cli.min_size,
+          cli.max_size,
+        )?;
       },
       Some(Command::List {
         format,
@@ -288,96 +274,61 @@ fn main() -> eyre::Result<()> {
       }) => {
         match format.as_deref() {
           Some("tsv") => {
-            report_error(
-              db.list(io::stdout(), cli.preview_width, expired, reverse),
-              "failed to list entries",
-            );
+            db.list(io::stdout(), cli.preview_width, expired, reverse)?;
           },
           Some("json") => {
-            match db.list_json(expired, reverse) {
-              Ok(json) => {
-                println!("{json}");
-              },
-              Err(e) => {
-                log::error!("failed to list entries as JSON: {e}");
-              },
-            }
+            println!("{}", db.list_json(expired, reverse)?);
           },
           Some(other) => {
-            log::error!("unsupported format: {other}");
+            bail!("unsupported format: {other}");
           },
           None => {
             if std::io::stdout().is_terminal() {
-              report_error(
-                db.list_tui(cli.preview_width, expired, reverse),
-                "failed to list entries in TUI",
-              );
+              db.list_tui(cli.preview_width, expired, reverse)?;
             } else {
-              report_error(
-                db.list(io::stdout(), cli.preview_width, expired, reverse),
-                "failed to list entries",
-              );
+              db.list(io::stdout(), cli.preview_width, expired, reverse)?;
             }
           },
         }
       },
       Some(Command::Decode { input }) => {
-        report_error(
-          db.decode(io::stdin(), io::stdout(), input),
-          "failed to decode entry",
-        );
+        db.decode(io::stdin(), io::stdout(), input)?;
       },
       Some(Command::Delete { arg, r#type, ask }) => {
         let mut should_proceed = true;
-        if ask {
+        if global_ask || ask {
           should_proceed =
             confirm("Are you sure you want to delete clipboard entries?");
 
           if !should_proceed {
-            log::info!("aborted by user.");
+            log::info!("aborted by user");
           }
         }
         if should_proceed {
           match (arg, r#type.as_deref()) {
             (Some(s), Some("id")) => {
-              if let Ok(id) = s.parse::<u64>() {
-                use std::io::Cursor;
-                report_error(
-                  db.delete(Cursor::new(format!("{id}\n"))),
-                  "Failed to delete entry by id",
-                );
-              } else {
-                log::error!("argument is not a valid id");
-              }
+              let id = s
+                .parse::<u64>()
+                .map_err(|_| eyre::eyre!("argument is not a valid id"))?;
+              use std::io::Cursor;
+              db.delete(Cursor::new(format!("{id}\n")))?;
             },
             (Some(s), Some("query")) => {
-              report_error(
-                db.query_delete(&s),
-                "failed to delete entry by query",
-              );
+              db.query_delete(&s)?;
             },
             (Some(s), None) => {
               if let Ok(id) = s.parse::<u64>() {
                 use std::io::Cursor;
-                report_error(
-                  db.delete(Cursor::new(format!("{id}\n"))),
-                  "failed to delete entry by id",
-                );
+                db.delete(Cursor::new(format!("{id}\n")))?;
               } else {
-                report_error(
-                  db.query_delete(&s),
-                  "failed to delete entry by query",
-                );
+                db.query_delete(&s)?;
               }
             },
             (None, _) => {
-              report_error(
-                db.delete(io::stdin()),
-                "failed to delete entry from stdin",
-              );
+              db.delete(io::stdin())?;
             },
             (_, Some(_)) => {
-              log::error!("unknown type for --type. Use \"id\" or \"query\".");
+              bail!("unknown type for --type. use \"id\" or \"query\"");
             },
           }
         }
@@ -387,7 +338,7 @@ fn main() -> eyre::Result<()> {
         match action {
           DbAction::Wipe { expired, ask } => {
             let mut should_proceed = true;
-            if ask {
+            if global_ask || ask {
               let message = if expired {
                 "Are you sure you want to wipe all expired clipboard entries?"
               } else {
@@ -395,7 +346,7 @@ fn main() -> eyre::Result<()> {
               };
               should_proceed = confirm(message);
               if !should_proceed {
-                log::info!("db wipe command aborted by user.");
+                log::info!("db wipe command aborted by user");
               }
             }
             if should_proceed {
@@ -405,16 +356,16 @@ fn main() -> eyre::Result<()> {
                     log::info!("wiped {count} expired entries");
                   },
                   Err(e) => {
-                    log::error!("failed to wipe expired entries: {e}");
+                    return Err(e.into());
                   },
                 }
               } else {
-                report_error(db.wipe_db(), "failed to wipe database");
+                db.wipe_db()?;
               }
             }
           },
           DbAction::Expire { ask } => {
-            let should_proceed = !ask
+            let should_proceed = !(global_ask || ask)
               || confirm(
                 "Are you sure you want to immediately expire all entries with \
                  a TTL?",
@@ -428,59 +379,42 @@ fn main() -> eyre::Result<()> {
                   println!("marked {count} entries as expired");
                 },
                 Err(e) => {
-                  log::error!("failed to expire entries: {e}");
+                  return Err(e.into());
                 },
               }
             } else {
-              log::info!("db expire command aborted by user.");
+              log::info!("db expire command aborted by user");
             }
           },
           DbAction::Vacuum => {
-            match db.vacuum() {
-              Ok(()) => {
-                log::info!("database optimized successfully");
-              },
-              Err(e) => {
-                log::error!("failed to vacuum database: {e}");
-              },
-            }
+            db.vacuum()?;
+            log::info!("database optimized successfully");
           },
           DbAction::Stats => {
-            match db.stats() {
-              Ok(stats) => {
-                println!("{stats}");
-              },
-              Err(e) => {
-                log::error!("failed to get database stats: {e}");
-              },
-            }
+            println!("{}", db.stats()?);
           },
         }
       },
 
       Some(Command::Import { r#type, ask }) => {
         let mut should_proceed = true;
-        if ask {
+        if global_ask || ask {
           should_proceed = confirm(
             "Are you sure you want to import clipboard data? This may \
              overwrite existing entries.",
           );
           if !should_proceed {
-            log::info!("import command aborted by user.");
+            log::info!("import command aborted by user");
           }
         }
         if should_proceed {
           let format = r#type.as_deref().unwrap_or("tsv");
           match format {
             "tsv" => {
-              if let Err(e) =
-                ImportCommand::import_tsv(&db, io::stdin(), cli.max_items)
-              {
-                log::error!("failed to import TSV: {e}");
-              }
+              ImportCommand::import_tsv(&db, io::stdin(), cli.max_items)?;
             },
             _ => {
-              log::error!("unsupported import format: {format}");
+              bail!("unsupported import format: {format}");
             },
           }
         }

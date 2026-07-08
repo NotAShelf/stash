@@ -39,17 +39,17 @@ impl DecodeCommand for SqliteClipboardDb {
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).map_err(|e| {
           StashError::DecodeRead(
-            format!("Failed to read clipboard for relay: {e}").into(),
+            format!("failed to read clipboard for relay: {e}").into(),
           )
         })?;
         out.write_all(&buf).map_err(|e| {
           StashError::DecodeWrite(
-            format!("Failed to write clipboard relay: {e}").into(),
+            format!("failed to write clipboard relay: {e}").into(),
           )
         })?;
       } else {
         return Err(StashError::DecodeGet(
-          "Failed to get clipboard contents for relay".into(),
+          "failed to get clipboard contents for relay".into(),
         ));
       }
       return Ok(());
@@ -70,12 +70,12 @@ impl DecodeCommand for SqliteClipboardDb {
           let mut buf = Vec::new();
           reader.read_to_end(&mut buf).map_err(|err| {
             StashError::DecodeRead(
-              format!("Failed to read clipboard for relay: {err}").into(),
+              format!("failed to read clipboard for relay: {err}").into(),
             )
           })?;
           out.write_all(&buf).map_err(|err| {
             StashError::DecodeWrite(
-              format!("Failed to write clipboard relay: {err}").into(),
+              format!("failed to write clipboard relay: {err}").into(),
             )
           })?;
           Ok(())

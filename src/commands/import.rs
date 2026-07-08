@@ -21,18 +21,18 @@ impl ImportCommand for SqliteClipboardDb {
     let mut imported = 0;
     for (lineno, line) in reader.lines().enumerate() {
       let line = line.map_err(|e| {
-        StashError::Store(format!("Failed to read line {lineno}: {e}").into())
+        StashError::Store(format!("failed to read line {lineno}: {e}").into())
       })?;
       let mut parts = line.splitn(2, '\t');
       let (Some(id_str), Some(val)) = (parts.next(), parts.next()) else {
         return Err(StashError::Store(
-          format!("Malformed TSV line {lineno}: {line:?}").into(),
+          format!("malformed tsv line {lineno}: {line:?}").into(),
         ));
       };
 
       let Ok(_id) = id_str.parse::<u64>() else {
         return Err(StashError::Store(
-          format!("Failed to parse id from line {lineno}: {id_str}").into(),
+          format!("failed to parse id from line {lineno}: {id_str}").into(),
         ));
       };
 
@@ -49,13 +49,13 @@ impl ImportCommand for SqliteClipboardDb {
         )
         .map_err(|e| {
           StashError::Store(
-            format!("Failed to insert entry at line {lineno}: {e}").into(),
+            format!("failed to insert entry at line {lineno}: {e}").into(),
           )
         })?;
       imported += 1;
     }
 
-    log::info!("imported {imported} records from TSV into SQLite database.");
+    log::info!("imported {imported} records from tsv into sqlite database");
 
     // Trim database to max_items after import
     self.trim_db(max_items)?;
