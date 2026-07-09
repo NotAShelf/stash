@@ -367,9 +367,31 @@ fn execute_watch_command(
   Ok(())
 }
 
+/// Whether a MIME type is an HTML-flavored representation that should be
+/// deprioritized. Covers `text/html` (with optional parameters) and Firefox's
+/// Mozilla-internal wrappers (`text/_moz_htmlcontext`, ...), which are UTF-16
+/// encoded and truncate at the first NUL byte when treated as text.
+fn is_html_like(mime: &str) -> bool {
+  mime == "text/html"
+    || mime.starts_with("text/html;")
+    || mime.starts_with("text/_moz")
+}
+
 /// Select the best MIME type from available types when none is specified.
-/// Prefers specific content types (image/*, application/*) over generic
-/// text representations (TEXT, STRING, `UTF8_STRING`).
+///
+/// The offered types arrive as an unordered [`HashSet`], so selection is made
+/// deterministic by resolving ties with lexicographic order. Preference,
+/// highest first:
+///
+/// 1. A concrete non-text type (`image/*`, `application/pdf`, ...).
+/// 2. Plain text: `text/plain;charset=*`, then `text/plain`, then any other
+///    non-HTML `text/*`.
+/// 3. Generic X11 text selections: `UTF8_STRING`, `STRING`, `TEXT`.
+/// 4. HTML-flavored wrappers, then anything else, only as a last resort.
+///
+/// HTML-flavored types are deprioritized throughout: browsers list them first
+/// even when a cleaner representation exists, and they are frequently UTF-16
+/// encoded.
 fn select_best_mime_type(
   types: &std::collections::HashSet<String>,
 ) -> Option<String> {
@@ -377,42 +399,45 @@ fn select_best_mime_type(
     return None;
   }
 
-  // If only one type available, use it
-  if types.len() == 1 {
-    return types.iter().next().cloned();
+  // Deterministic view of the offered types (HashSet has no stable order).
+  let mut sorted: Vec<&String> = types.iter().collect();
+  sorted.sort();
+
+  let first_match = |pred: &dyn Fn(&str) -> bool| -> Option<String> {
+    sorted
+      .iter()
+      .find(|m| pred(m.as_str()))
+      .map(|m| (*m).clone())
+  };
+
+  // 1. Concrete non-text type (image/*, application/*, ...), never HTML-like.
+  if let Some(m) = first_match(&|m| m.contains('/') && !m.starts_with("text/"))
+  {
+    return Some(m);
   }
 
-  // Prefer specific MIME types with slashes (e.g., image/png, application/pdf)
-  // over generic X11 selections (TEXT, STRING, UTF8_STRING)
-  let specific_types: Vec<_> =
-    types.iter().filter(|t| t.contains('/')).collect();
-
-  if !specific_types.is_empty() {
-    // Among specific types, prefer non-text types first
-    for mime in &specific_types {
-      if !mime.starts_with("text/") {
-        return Some((*mime).clone());
-      }
-    }
-    // If all are text types, prefer text/plain with charset
-    for mime in &specific_types {
-      if mime.starts_with("text/plain;charset=") {
-        return Some((*mime).clone());
-      }
-    }
-    // Otherwise return first specific type
-    return Some(specific_types[0].clone());
+  // 2. Plain text, most specific first.
+  if let Some(m) = first_match(&|m| m.starts_with("text/plain;charset=")) {
+    return Some(m);
+  }
+  if let Some(m) = first_match(&|m| m == "text/plain") {
+    return Some(m);
+  }
+  if let Some(m) = first_match(&|m| m.starts_with("text/") && !is_html_like(m))
+  {
+    return Some(m);
   }
 
-  // Fall back to generic text selections in order of preference
-  for fallback in &["UTF8_STRING", "STRING", "TEXT"] {
-    if types.contains(*fallback) {
-      return Some((*fallback).to_string());
+  // 3. Generic X11 text selections, in a fixed preference order.
+  for fallback in ["UTF8_STRING", "STRING", "TEXT"] {
+    if types.contains(fallback) {
+      return Some(fallback.to_string());
     }
   }
 
-  // Last resort: return any available type
-  types.iter().next().cloned()
+  // 4. HTML wrapper or anything else, deterministically.
+  first_match(&|m| !is_html_like(m))
+    .or_else(|| sorted.first().map(|m| (*m).clone()))
 }
 
 fn handle_regular_paste(
@@ -542,4 +567,101 @@ pub fn wl_paste_main() -> Result<()> {
   handle_regular_paste(&args, clipboard, seat)?;
 
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use std::collections::HashSet;
+
+  use super::*;
+
+  fn set(items: &[&str]) -> HashSet<String> {
+    items.iter().map(|s| (*s).to_string()).collect()
+  }
+
+  #[test]
+  fn test_empty_returns_none() {
+    assert_eq!(select_best_mime_type(&set(&[])), None);
+  }
+
+  #[test]
+  fn test_single_type() {
+    assert_eq!(
+      select_best_mime_type(&set(&["text/plain"])).as_deref(),
+      Some("text/plain")
+    );
+  }
+
+  #[test]
+  fn test_deterministic_across_runs() {
+    // A HashSet's iteration order is unspecified; the same offer set must
+    // always resolve to the same MIME type regardless of internal ordering.
+    let offered = set(&[
+      "text/html",
+      "text/_moz_htmlcontext",
+      "text/plain",
+      "UTF8_STRING",
+    ]);
+    let first = select_best_mime_type(&offered);
+    for _ in 0..100 {
+      assert_eq!(select_best_mime_type(&offered), first);
+    }
+    // ...and it must be the plain-text representation, not an HTML wrapper.
+    assert_eq!(first.as_deref(), Some("text/plain"));
+  }
+
+  #[test]
+  fn test_prefers_concrete_non_text() {
+    let offered = set(&["text/html", "image/png", "text/plain"]);
+    assert_eq!(
+      select_best_mime_type(&offered).as_deref(),
+      Some("image/png")
+    );
+  }
+
+  #[test]
+  fn test_prefers_charset_plain_over_bare_plain() {
+    let offered = set(&["text/plain", "text/plain;charset=utf-8"]);
+    assert_eq!(
+      select_best_mime_type(&offered).as_deref(),
+      Some("text/plain;charset=utf-8")
+    );
+  }
+
+  #[test]
+  fn test_plain_wins_over_html() {
+    let offered = set(&["text/html", "text/plain"]);
+    assert_eq!(
+      select_best_mime_type(&offered).as_deref(),
+      Some("text/plain")
+    );
+  }
+
+  #[test]
+  fn test_generic_selection_fallback() {
+    let offered = set(&["UTF8_STRING", "STRING", "TEXT"]);
+    assert_eq!(
+      select_best_mime_type(&offered).as_deref(),
+      Some("UTF8_STRING")
+    );
+  }
+
+  #[test]
+  fn test_html_only_as_last_resort() {
+    let offered = set(&["text/html"]);
+    assert_eq!(
+      select_best_mime_type(&offered).as_deref(),
+      Some("text/html")
+    );
+  }
+
+  #[test]
+  fn test_multiple_images_deterministic() {
+    // Ties between concrete types resolve lexicographically.
+    let offered = set(&["image/png", "image/jpeg"]);
+    assert_eq!(
+      select_best_mime_type(&offered).as_deref(),
+      Some("image/jpeg")
+    );
+  }
 }
