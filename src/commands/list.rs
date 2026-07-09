@@ -735,8 +735,14 @@ impl SqliteClipboardDb {
                 tui.copying_entry = Some(id);
                 match self.copy_entry(id) {
                   Ok((new_id, contents, mime)) => {
+                    // Copying updates `last_accessed`, which reorders the list,
+                    // and a running `stash watch` daemon may renumber the entry
+                    // (dedup deletes then reinserts identical content). Always
+                    // refresh so the window reflects current ids and ordering.
+                    tui.dirty = true;
                     if new_id != id {
-                      tui.dirty = true;
+                      tui.total = self
+                        .count_entries(include_expired, tui.search_filter())?;
                     }
                     let opts = Options::new();
                     let mime_type = match mime {
@@ -758,6 +764,23 @@ impl SqliteClipboardDb {
                         notify("stash", &body);
                       },
                     }
+                  },
+                  Err(StashError::DecodeGet(_)) => {
+                    // The row vanished between load and copy: a running
+                    // `stash watch` daemon renumbered it (dedup deletes then
+                    // reinserts the same content under a new id) after we
+                    // re-served the clipboard. Refresh the window rather than
+                    // surfacing an error; the entry now lives under a new id.
+                    log::debug!(
+                      "entry {id} vanished (likely renumbered by watch \
+                       daemon); refreshing list"
+                    );
+                    tui.total = self
+                      .count_entries(include_expired, tui.search_filter())?;
+                    tui.dirty = true;
+                    tui.status = Some(
+                      "list changed, refreshed - press Enter again".into(),
+                    );
                   },
                   Err(e) => {
                     log::error!("failed to fetch entry {id}: {e}");
