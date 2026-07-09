@@ -68,8 +68,20 @@ impl ListQueryBuilder {
     }
 
     if self.search_pattern.is_some() {
-      conditions
-        .push("(LOWER(CAST(contents AS TEXT)) LIKE LOWER(?1) ESCAPE '!')");
+      // Scope content search to text-like entries. The `mime` guard is cheap
+      // and short-circuits before the per-row `CAST(contents AS TEXT)` + LIKE,
+      // so large image/binary blobs are never materialized or scanned. It also
+      // avoids spurious matches against binary bytes that happen to contain
+      // the ASCII pattern.
+      //
+      // NOTE: with encryption enabled `contents` is ciphertext, so this LIKE
+      // cannot match plaintext for encrypted entries. Content search over
+      // encrypted history needs a separate design (e.g. a plaintext FTS index)
+      // and is intentionally out of scope here.
+      conditions.push(
+        "((mime LIKE 'text/%' OR mime = 'application/json') AND \
+         LOWER(CAST(contents AS TEXT)) LIKE LOWER(?1) ESCAPE '!')",
+      );
     }
 
     if conditions.is_empty() {
@@ -99,6 +111,27 @@ impl ListQueryBuilder {
     format!(
       "SELECT id, contents, mime FROM clipboard {where_clause} {order_clause} \
        {pagination}"
+    )
+    .trim()
+    .to_string()
+  }
+
+  /// Query for building list previews without materializing binary blobs.
+  ///
+  /// Returns `id, mime, LENGTH(contents), body`, where `body` is the raw
+  /// stored bytes only for text-like (or unknown-mime) entries and `NULL`
+  /// otherwise. Since `mime` already records the detected type, image/binary
+  /// previews are rendered from the length alone, so SQLite never reads those
+  /// (potentially multi-megabyte) blobs off disk or decrypts them.
+  fn select_preview_query(&self) -> String {
+    let where_clause = self.where_clause();
+    let order_clause = self.order_clause();
+    let pagination = self.pagination_clause();
+
+    format!(
+      "SELECT id, mime, LENGTH(contents), CASE WHEN mime IS NULL OR mime LIKE \
+       'text/%' OR mime = 'application/json' THEN contents ELSE NULL END FROM \
+       clipboard {where_clause} {order_clause} {pagination}"
     )
     .trim()
     .to_string()
@@ -252,11 +285,6 @@ pub trait ClipboardDb {
     mime_types: Option<&[String]>,
   ) -> Result<i64, StashError>;
 
-  fn deduplicate_by_hash(
-    &self,
-    content_hash: i64,
-    max: u64,
-  ) -> Result<usize, StashError>;
   fn trim_db(&self, max_items: u64) -> Result<(), StashError>;
   fn delete_last(&self) -> Result<(), StashError>;
   fn wipe_db(&self) -> Result<(), StashError>;
@@ -430,6 +458,23 @@ impl SqliteClipboardDb {
         .map_err(migration_err)?;
     }
 
+    if schema_version < 7 {
+      // Expression index matching the list ORDER BY
+      // (`COALESCE(last_accessed, 0) <dir>, id <dir>`). Without it the
+      // COALESCE hides `last_accessed` from idx_last_accessed, forcing a full
+      // scan + sort on every window fetch; with it SQLite can walk the index
+      // in either direction and satisfy the ordering for both normal and
+      // reversed listings.
+      tx.execute(
+        "CREATE INDEX IF NOT EXISTS idx_clipboard_order ON \
+         clipboard(COALESCE(last_accessed, 0) DESC, id DESC)",
+        [],
+      )
+      .map_err(migration_err)?;
+      tx.pragma_update(None, "user_version", 7i64)
+        .map_err(migration_err)?;
+    }
+
     tx.commit().map_err(|e| {
       StashError::Store(
         format!("failed to commit migration transaction: {e}").into(),
@@ -590,8 +635,6 @@ impl ClipboardDb for SqliteClipboardDb {
       return Err(StashError::SensitiveMimeHint);
     }
 
-    self.deduplicate_by_hash(content_hash, max_dedupe_search)?;
-
     let mime_types_json: Option<String> = match mime_types {
       Some(types) => {
         Some(
@@ -601,6 +644,18 @@ impl ClipboardDb for SqliteClipboardDb {
       },
       None => None,
     };
+
+    // Re-copying content that is already stored must not mint a new id.
+    // Refresh the existing entry in place (move-to-top) and reuse its id, so
+    // references held elsewhere (the `stash list` TUI, `stash decode <id>`)
+    // stay valid. Only genuinely new content falls through to an INSERT.
+    if let Some(id) = self.refresh_duplicate(
+      content_hash,
+      max_dedupe_search,
+      mime_types_json.as_deref(),
+    )? {
+      return Ok(id);
+    }
 
     let contents_to_store = EntryEncoding::encode(&buf)?.into_raw();
 
@@ -626,41 +681,6 @@ impl ClipboardDb for SqliteClipboardDb {
 
     self.trim_db(max_items)?;
     Ok(id)
-  }
-
-  fn deduplicate_by_hash(
-    &self,
-    content_hash: i64,
-    max: u64,
-  ) -> Result<usize, StashError> {
-    let mut stmt = self
-      .conn
-      .prepare(
-        "SELECT id FROM clipboard WHERE content_hash = ?1 ORDER BY id DESC \
-         LIMIT ?2",
-      )
-      .map_err(|e| StashError::DeduplicationRead(e.to_string().into()))?;
-    let mut rows = stmt
-      .query(params![
-        content_hash,
-        i64::try_from(max).unwrap_or(i64::MAX)
-      ])
-      .map_err(|e| StashError::DeduplicationRead(e.to_string().into()))?;
-    let mut deduped = 0;
-    while let Some(row) = rows
-      .next()
-      .map_err(|e| StashError::DeduplicationRead(e.to_string().into()))?
-    {
-      let id: i64 = row
-        .get(0)
-        .map_err(|e| StashError::DeduplicationDecode(e.to_string().into()))?;
-      self
-        .conn
-        .execute("DELETE FROM clipboard WHERE id = ?1", params![id])
-        .map_err(|e| StashError::DeduplicationRemove(e.to_string().into()))?;
-      deduped += 1;
-    }
-    Ok(deduped)
   }
 
   fn trim_db(&self, max: u64) -> Result<(), StashError> {
@@ -892,6 +912,66 @@ impl ClipboardDb for SqliteClipboardDb {
 }
 
 impl SqliteClipboardDb {
+  /// Handle a store of content whose hash already exists as a re-copy.
+  ///
+  /// Refreshes the most recent existing entry sharing `content_hash` in place
+  /// (bumping `last_accessed` so it sorts to the top, and refreshing
+  /// `mime_types` when provided), collapses any older duplicates into it, and
+  /// returns the kept id. Returns `None` when no entry with this hash exists,
+  /// in which case the caller inserts a new row.
+  ///
+  /// Reusing the existing id — rather than deleting and reinserting under a
+  /// fresh one — keeps ids stable for references held by the `stash list` TUI
+  /// and `stash decode <id>`, and avoids gratuitous id churn.
+  fn refresh_duplicate(
+    &self,
+    content_hash: i64,
+    max: u64,
+    mime_types_json: Option<&str>,
+  ) -> Result<Option<i64>, StashError> {
+    let mut stmt = self
+      .conn
+      .prepare(
+        "SELECT id FROM clipboard WHERE content_hash = ?1 ORDER BY id DESC \
+         LIMIT ?2",
+      )
+      .map_err(|e| StashError::DeduplicationRead(e.to_string().into()))?;
+    let ids: Vec<i64> = stmt
+      .query_map(
+        params![content_hash, i64::try_from(max).unwrap_or(i64::MAX)],
+        |row| row.get(0),
+      )
+      .map_err(|e| StashError::DeduplicationRead(e.to_string().into()))?
+      .collect::<Result<_, _>>()
+      .map_err(|e| StashError::DeduplicationDecode(e.to_string().into()))?;
+    drop(stmt);
+
+    let Some((&keep_id, older)) = ids.split_first() else {
+      return Ok(None);
+    };
+
+    // Collapse any older duplicates into the kept (newest) entry.
+    for &id in older {
+      self
+        .conn
+        .execute("DELETE FROM clipboard WHERE id = ?1", params![id])
+        .map_err(|e| StashError::DeduplicationRemove(e.to_string().into()))?;
+    }
+
+    // Move the kept entry to the top; refresh mime_types only when the new
+    // store provides them (COALESCE preserves the prior value otherwise).
+    self
+      .conn
+      .execute(
+        "UPDATE clipboard SET last_accessed = ?2, mime_types = COALESCE(?3, \
+         mime_types) WHERE id = ?1",
+        params![keep_id, Self::now() as i64, mime_types_json],
+      )
+      .map_err(|e| StashError::Store(e.to_string().into()))?;
+
+    Ok(Some(keep_id))
+  }
+
   /// Count visible clipboard entries, with respect to `include_expired` and
   /// optional search filter.
   pub fn count_entries(
@@ -931,7 +1011,7 @@ impl SqliteClipboardDb {
     let builder = ListQueryBuilder::new(include_expired, reverse)
       .with_search(search)
       .with_pagination(offset, limit);
-    let query = builder.select_star_query();
+    let query = builder.select_preview_query();
 
     let mut stmt = self
       .conn
@@ -956,20 +1036,40 @@ impl SqliteClipboardDb {
       let id: i64 = row
         .get(0)
         .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
-      let contents: Vec<u8> = row
+      let mime: Option<String> = row
         .get(1)
         .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
-      let mime: Option<String> = row
+      let raw_len: i64 = row
         .get(2)
         .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
-      let plaintext = match EntryEncoding::classify(contents).decode() {
-        Ok(p) => p,
-        Err(e) => {
-          warn!("skipping entry {id}: {e}");
-          continue;
+      let body: Option<Vec<u8>> = row
+        .get(3)
+        .map_err(|e| StashError::ListDecode(e.to_string().into()))?;
+
+      let preview = match body {
+        // Text-like (or unknown-mime) entry: decode and render a text preview.
+        Some(contents) => {
+          match EntryEncoding::classify(contents).decode() {
+            Ok(plaintext) => {
+              preview_entry(&plaintext, mime.as_deref(), preview_width)
+            },
+            Err(e) => {
+              warn!("skipping entry {id}: {e}");
+              continue;
+            },
+          }
+        },
+        // Binary/image entry: the blob was not read. Render from length + mime.
+        // The size reflects the stored byte count, which equals the original
+        // length for plaintext entries and is within the age framing overhead
+        // for encrypted ones.
+        None => {
+          let mime_label =
+            mime.as_deref().unwrap_or("application/octet-stream");
+          let len = usize::try_from(raw_len).unwrap_or(0);
+          format!("[[ binary data {} {mime_label} ]]", size_str(len))
         },
       };
-      let preview = preview_entry(&plaintext, mime.as_deref(), preview_width);
       let mime_str = mime.unwrap_or_default();
       window.push((id, preview, mime_str));
     }
@@ -1434,7 +1534,7 @@ mod tests {
 
     assert_eq!(
       get_schema_version(&db.conn).expect("Failed to get schema version"),
-      6
+      7
     );
 
     assert!(table_column_exists(&db.conn, "clipboard", "content_hash"));
@@ -1487,7 +1587,7 @@ mod tests {
     assert_eq!(
       get_schema_version(&db.conn)
         .expect("Failed to get version after migration"),
-      6
+      7
     );
 
     assert!(table_column_exists(&db.conn, "clipboard", "content_hash"));
@@ -1531,7 +1631,7 @@ mod tests {
     assert_eq!(
       get_schema_version(&db.conn)
         .expect("Failed to get version after migration"),
-      6
+      7
     );
 
     assert!(table_column_exists(&db.conn, "clipboard", "content_hash"));
@@ -1576,7 +1676,7 @@ mod tests {
     assert_eq!(
       get_schema_version(&db.conn)
         .expect("Failed to get version after migration"),
-      6
+      7
     );
 
     assert!(table_column_exists(&db.conn, "clipboard", "last_accessed"));
@@ -1614,7 +1714,7 @@ mod tests {
       get_schema_version(&db2.conn).expect("Failed to get version");
 
     assert_eq!(version_after_first, version_after_second);
-    assert_eq!(version_after_first, 6);
+    assert_eq!(version_after_first, 7);
   }
 
   #[test]
@@ -1713,6 +1813,126 @@ mod tests {
   }
 
   #[test]
+  fn test_window_image_preview_needs_no_blob() {
+    // An image entry's list preview is rendered from its mime + stored length;
+    // the CASE in select_preview_query returns NULL for its body so the blob is
+    // never read. The preview must still match preview_entry's binary form.
+    let db = test_db();
+    let data: Vec<u8> = vec![
+      0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
+      0x00, 0x00, 0x00, 0x0D, // IHDR length
+      0x49, 0x48, 0x44, 0x52, // "IHDR"
+      0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // 1x1
+      0x08, 0x02, 0x00, 0x00, 0x00, // bit depth, color, etc.
+      0x90, 0x77, 0x53, 0xDE, // CRC
+    ];
+    db.store_entry(
+      std::io::Cursor::new(data.clone()),
+      100,
+      1000,
+      None,
+      None,
+      DEFAULT_MAX_ENTRY_SIZE,
+      None,
+      None,
+    )
+    .expect("Failed to store image");
+
+    let window = db
+      .fetch_entries_window(true, 0, 10, 100, None, false)
+      .expect("Failed to fetch window");
+    assert_eq!(window.len(), 1);
+    let (_, preview, mime) = &window[0];
+    assert_eq!(mime, "image/png");
+    let expected = preview_entry(&data, Some("image/png"), 100);
+    assert_eq!(preview, &expected);
+    assert!(preview.starts_with("[[ binary data "));
+    assert!(preview.contains("image/png"));
+  }
+
+  #[test]
+  fn test_search_matches_text_entries() {
+    // Regression guard for the mime-scoped search predicate: text content is
+    // still matched by both the count and the window query.
+    let db = test_db();
+    db.store_entry(
+      std::io::Cursor::new(b"the quick brown fox".to_vec()),
+      100,
+      1000,
+      None,
+      None,
+      DEFAULT_MAX_ENTRY_SIZE,
+      None,
+      None,
+    )
+    .expect("Failed to store text");
+
+    assert_eq!(
+      db.count_entries(true, Some("brown")).expect("count"),
+      1,
+      "text content should be found by search"
+    );
+    assert_eq!(
+      db.count_entries(true, Some("absent")).expect("count"),
+      0,
+      "non-matching search should return nothing"
+    );
+    let window = db
+      .fetch_entries_window(true, 0, 10, 100, Some("brown"), false)
+      .expect("window");
+    assert_eq!(window.len(), 1);
+  }
+
+  #[test]
+  fn test_ordering_index_present() {
+    // The expression index backing the list ORDER BY must be created by the
+    // schema migration; without it every window fetch falls back to a full
+    // scan + sort.
+    let db = test_db();
+    assert!(index_exists(&db.conn, "idx_clipboard_order"));
+  }
+
+  #[test]
+  fn test_list_order_uses_index_no_temp_sort() {
+    // The list ORDER BY must be satisfied by idx_clipboard_order rather than a
+    // materialized sort. With enough rows for the planner to prefer the index,
+    // the query plan must not contain a temporary B-tree sort step.
+    let db = test_db();
+    for i in 0..300i64 {
+      db.conn
+        .execute(
+          "INSERT INTO clipboard (contents, mime, last_accessed) VALUES \
+           (x'00', 'text/plain', ?1)",
+          params![i],
+        )
+        .expect("insert");
+    }
+
+    let builder = ListQueryBuilder::new(false, false).with_pagination(0, 24);
+    let query = builder.select_preview_query();
+
+    let mut stmt = db
+      .conn
+      .prepare(&format!("EXPLAIN QUERY PLAN {query}"))
+      .expect("prepare plan");
+    let plan: String = stmt
+      .query_map([], |row| row.get::<_, String>(3))
+      .expect("query plan")
+      .filter_map(Result::ok)
+      .collect::<Vec<_>>()
+      .join("\n");
+
+    assert!(
+      plan.contains("idx_clipboard_order"),
+      "list query should use the ordering index; plan was:\n{plan}"
+    );
+    assert!(
+      !plan.contains("USE TEMP B-TREE FOR ORDER BY"),
+      "list query should not materialize a sort; plan was:\n{plan}"
+    );
+  }
+
+  #[test]
   fn test_deduplication() {
     let db = test_db();
     let data = b"duplicate content";
@@ -1729,7 +1949,7 @@ mod tests {
         None,
       )
       .expect("Failed to store first");
-    let _id2 = db
+    let id2 = db
       .store_entry(
         std::io::Cursor::new(data.to_vec()),
         100,
@@ -1742,14 +1962,16 @@ mod tests {
       )
       .expect("Failed to store second");
 
-    // First entry should have been removed by deduplication
+    // Storing identical content collapses to a single entry.
     let count: i64 = db
       .conn
       .query_row("SELECT COUNT(*) FROM clipboard", [], |row| row.get(0))
       .expect("Failed to count");
     assert_eq!(count, 1, "Deduplication should keep only one copy");
 
-    // The original id should be gone
+    // A re-copy is a move-to-top, not a new entry: the id must be preserved so
+    // references held by the TUI and `stash decode <id>` stay valid.
+    assert_eq!(id1, id2, "Re-copied content should keep the same id");
     let exists: bool = db
       .conn
       .query_row(
@@ -1759,7 +1981,10 @@ mod tests {
       )
       .map(|c| c > 0)
       .unwrap_or(false);
-    assert!(!exists, "Old entry should be removed");
+    assert!(
+      exists,
+      "Original entry should be refreshed in place, not removed"
+    );
   }
 
   #[test]
@@ -2197,7 +2422,7 @@ mod tests {
       .expect("set version");
 
     let db = SqliteClipboardDb::new(conn, db_path).expect("migrate");
-    assert_eq!(get_schema_version(&db.conn).expect("version"), 6);
+    assert_eq!(get_schema_version(&db.conn).expect("version"), 7);
     assert!(table_column_exists(&db.conn, "clipboard", "expires_at"));
     assert!(table_column_exists(&db.conn, "clipboard", "is_expired"));
     assert!(table_column_exists(&db.conn, "clipboard", "mime_types"));
@@ -2232,7 +2457,7 @@ mod tests {
       .expect("set version");
 
     let db = SqliteClipboardDb::new(conn, db_path).expect("migrate");
-    assert_eq!(get_schema_version(&db.conn).expect("version"), 6);
+    assert_eq!(get_schema_version(&db.conn).expect("version"), 7);
     assert!(table_column_exists(&db.conn, "clipboard", "is_expired"));
     assert!(table_column_exists(&db.conn, "clipboard", "mime_types"));
     let count: i64 = db
@@ -2267,7 +2492,7 @@ mod tests {
       .expect("set version");
 
     let db = SqliteClipboardDb::new(conn, db_path).expect("migrate");
-    assert_eq!(get_schema_version(&db.conn).expect("version"), 6);
+    assert_eq!(get_schema_version(&db.conn).expect("version"), 7);
     assert!(table_column_exists(&db.conn, "clipboard", "mime_types"));
   }
 
