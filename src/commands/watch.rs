@@ -132,6 +132,19 @@ impl ExpirationQueue {
 ///
 /// The content reader, the selected MIME type, and ALL offered MIME
 /// types.
+/// Whether a MIME type is an HTML-flavored representation that a clipboard
+/// manager should deprioritize in favor of a plain-text or binary form.
+///
+/// Covers `text/html` (with optional parameters like `;charset=utf-8`) and
+/// Firefox's Mozilla-internal wrappers (`text/_moz_htmlcontext`,
+/// `text/_moz_htmlinfo`, ...). The latter are UTF-16 encoded and, if stored,
+/// get mislabeled as `text/plain` and truncate at the first NUL byte on paste.
+fn is_html_like(mime: &str) -> bool {
+  mime == "text/html"
+    || mime.starts_with("text/html;")
+    || mime.starts_with("text/_moz")
+}
+
 #[expect(clippy::type_complexity)]
 fn negotiate_mime_type(
   preference: &str,
@@ -157,22 +170,26 @@ fn negotiate_mime_type(
       .find(|m| m.starts_with("image/"))
       .or_else(|| offered.first())
   } else {
-    // XXX: When preference is "any", deprioritize text/html if a more
-    // concrete type is available. Browsers and Electron apps put
-    // text/html first even for "Copy Image", but the HTML is just
-    // a wrapper (<img src="...">), i.e., never what the user wants in a
-    // clipboard manager. Prefer image/* first, then any non-html
-    // type, and fall back to text/html only as a last resort.
+    // XXX: When preference is "any", deprioritize HTML-flavored types if a
+    // more concrete type is available. Browsers and Electron apps put
+    // text/html first even for "Copy Image", but the HTML is just a wrapper
+    // (<img src="...">), i.e., never what the user wants in a clipboard
+    // manager. Firefox also lists Mozilla-internal wrappers
+    // (text/_moz_htmlcontext, text/_moz_htmlinfo) ahead of the plain-text
+    // representation, and those are UTF-16 encoded, so storing them mislabels
+    // the entry as text/plain and truncates at the first NUL byte on paste.
+    // Prefer image/* first, then any non-HTML-like type, and fall back to the
+    // HTML wrapper only as a last resort.
     let has_image = offered.iter().any(|m| m.starts_with("image/"));
     if has_image {
       offered
         .iter()
         .find(|m| m.starts_with("image/"))
         .or_else(|| offered.first())
-    } else if offered.first().is_some_and(|m| m == "text/html") {
+    } else if offered.first().is_some_and(|m| is_html_like(m)) {
       offered
         .iter()
-        .find(|m| *m != "text/html")
+        .find(|m| !is_html_like(m))
         .or_else(|| offered.first())
     } else {
       offered.first()
@@ -506,10 +523,10 @@ fn pick_mime<'a>(
         .iter()
         .find(|m| m.starts_with("image/"))
         .or_else(|| offered.first())
-    } else if offered.first().is_some_and(|m| m == "text/html") {
+    } else if offered.first().is_some_and(|m| is_html_like(m)) {
       offered
         .iter()
-        .find(|m| *m != "text/html")
+        .find(|m| !is_html_like(m))
         .or_else(|| offered.first())
     } else {
       offered.first()
@@ -580,6 +597,30 @@ mod tests {
   fn test_pick_text_over_html_when_no_image() {
     // html + plain with no image type; plain text wins over html.
     let offered = vec!["text/html".to_string(), "text/plain".to_string()];
+    assert_eq!(pick_mime(&offered, "any").unwrap(), "text/plain");
+  }
+
+  #[test]
+  fn test_pick_skips_moz_internal_wrappers() {
+    // Firefox text selection: text/html and the Mozilla-internal wrappers are
+    // offered ahead of text/plain. All are UTF-16 encoded and would truncate
+    // at the first NUL byte on paste, so we must skip past them to text/plain.
+    // Regression test for HTML entries decoding to `<`.
+    let offered = vec![
+      "text/html".to_string(),
+      "text/_moz_htmlcontext".to_string(),
+      "text/_moz_htmlinfo".to_string(),
+      "text/plain".to_string(),
+    ];
+    assert_eq!(pick_mime(&offered, "any").unwrap(), "text/plain");
+  }
+
+  #[test]
+  fn test_pick_html_with_charset_is_deprioritized() {
+    let offered = vec![
+      "text/html;charset=utf-8".to_string(),
+      "text/plain".to_string(),
+    ];
     assert_eq!(pick_mime(&offered, "any").unwrap(), "text/plain");
   }
 

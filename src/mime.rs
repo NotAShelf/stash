@@ -13,8 +13,17 @@ pub fn detect_mime(data: &[u8]) -> Option<String> {
     return Some(image_type_to_mime(img_type));
   }
 
-  // Check if it's UTF-8 text
-  if let Ok(text) = std::str::from_utf8(data) {
+  // Check if it's UTF-8 text.
+  //
+  // Reject content with embedded NUL bytes: real plain text never contains
+  // them, and their presence is a strong signal of UTF-16 (e.g. Firefox's
+  // text/html and text/_moz_* representations, where ASCII-range characters
+  // are `XX 00`). Such data trivially passes `from_utf8`, but labeling it
+  // text/plain truncates it at the first NUL on paste. Fall through to binary
+  // detection instead.
+  if let Ok(text) = std::str::from_utf8(data)
+    && !text.contains('\0')
+  {
     let trimmed = text.trim();
 
     // Check for text/uri-list format (file paths from file managers)
@@ -138,6 +147,15 @@ mod tests {
   fn test_not_uri_list() {
     let data = b"This is just text with file:// in the middle";
     assert_eq!(detect_mime(data), Some("text/plain".to_string()));
+  }
+
+  #[test]
+  fn test_utf16le_not_plain_text() {
+    // UTF-16LE "<html". This passes from_utf8 (all bytes < 0x80) but contains
+    // NUL bytes. Must not be labeled text/plain, or it truncates at `<` on
+    // paste.
+    let data = b"<\x00h\x00t\x00m\x00l\x00";
+    assert_ne!(detect_mime(data), Some("text/plain".to_string()));
   }
 
   #[test]
