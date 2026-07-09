@@ -286,12 +286,12 @@ mod tests {
     let cloned = async_db.clone();
 
     smol::block_on(async {
-      // Both should work independently
-      let data = b"clone test";
-
+      // Both handles write to the same database. Use distinct content so the
+      // stores are genuinely separate entries (identical content would be
+      // collapsed into one by the move-to-top dedup).
       let id1 = async_db
         .store_entry(
-          data.to_vec(),
+          b"clone test one".to_vec(),
           100,
           1000,
           None,
@@ -305,7 +305,7 @@ mod tests {
 
       let id2 = cloned
         .store_entry(
-          data.to_vec(),
+          b"clone test two".to_vec(),
           100,
           1000,
           None,
@@ -318,6 +318,26 @@ mod tests {
         .expect("Failed with clone");
 
       assert_ne!(id1, id2, "Should store as separate entries");
+
+      // Both entries must be visible through the shared database: the entry
+      // written via the original handle is readable through the clone, and
+      // vice versa.
+      assert!(
+        cloned
+          .get_content_hash(id1)
+          .await
+          .expect("Failed to read id1")
+          .is_some(),
+        "Clone should see entry written by original"
+      );
+      assert!(
+        async_db
+          .get_content_hash(id2)
+          .await
+          .expect("Failed to read id2")
+          .is_some(),
+        "Original should see entry written by clone"
+      );
     });
   }
 
