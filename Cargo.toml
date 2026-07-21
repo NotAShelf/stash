@@ -14,31 +14,31 @@ name = "stash"       # actual binary name for Nix, Cargo, etc.
 path = "src/main.rs"
 
 [dependencies]
-age                   = { version = "0.11.3", optional = true }
-arc-swap              = { version = "1.9.1", optional = true }
+age                   = { version = "0.12.1", optional = true }
+arc-swap              = { version = "1.9.2", optional = true }
 base64                = "0.22.1"
 blocking              = "1.6.2"
-clap                  = { version = "4.6.1", features = [ "derive", "env" ] }
+clap                  = { version = "4.6.3", features = [ "derive", "env" ] }
 clap-verbosity-flag   = "3.0.4"
 color-eyre            = "0.6.5"
 crossterm             = "0.29.0"
 ctrlc                 = "3.5.2"
 dirs                  = "6.0.0"
-env_logger            = "0.11.10"
-humantime             = "2.3.0"
-imagesize             = "0.14.0"
+env_logger            = "0.11.11"
+humantime             = "2.4.0"
+imagesize             = "0.15.0"
 inquire               = { version = "0.9.4", default-features = false, features = [ "crossterm" ] }
-libc                  = "0.2.186"
-log                   = "0.4.32"
+libc                  = "0.2.188"
+log                   = "0.4.33"
 mime-sniffer          = "0.1.3"
 notify-rust           = { version = "4.18.0", optional = true }
-ratatui               = "0.30.1"
-regex                 = "1.12.4"
+ratatui               = "0.30.2"
+regex                 = "1.13.1"
 rusqlite              = { version = "0.40.1", features = [ "bundled" ] }
-serde                 = { version = "1.0.228", features = [ "derive" ] }
-serde_json            = "1.0.150"
+serde                 = { version = "1.0.229", features = [ "derive" ] }
+serde_json            = "1.0.151"
 smol                  = "2.0.2"
-thiserror             = "2.0.18"
+thiserror             = "2.0.19"
 unicode-segmentation  = "1.13.3"
 unicode-width         = "0.2.2"
 wayland-client        = { version = "0.31.14", features = [ "log" ], optional = true }
@@ -46,7 +46,7 @@ wayland-protocols-wlr = { version = "0.3.12", default-features = false, optional
 wl-clipboard-rs       = "0.9.3"
 
 [dev-dependencies]
-futures  = "0.3.32"
+futures  = "0.3.33"
 tempfile = "3.27.0"
 
 [features]
