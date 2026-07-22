@@ -49,7 +49,7 @@ fn image_type_to_mime(img_type: ImageType) -> String {
     ImageType::Tiff => "image/tiff",
     ImageType::Webp => "image/webp",
     ImageType::Aseprite => "image/x-aseprite",
-    ImageType::Dds => "image/vnd.ms-dds",
+    ImageType::Dds(_) => "image/vnd.ms-dds",
     ImageType::Exr => "image/aces",
     ImageType::Farbfeld => "image/farbfeld",
     ImageType::Hdr => "image/vnd.radiance",
@@ -260,7 +260,10 @@ mod tests {
     assert_eq!(image_type_to_mime(ImageType::Tiff), "image/tiff");
     assert_eq!(image_type_to_mime(ImageType::Webp), "image/webp");
     assert_eq!(image_type_to_mime(ImageType::Aseprite), "image/x-aseprite");
-    assert_eq!(image_type_to_mime(ImageType::Dds), "image/vnd.ms-dds");
+    assert_eq!(
+      image_type_to_mime(ImageType::Dds(imagesize::DdsCompression::Bc1)),
+      "image/vnd.ms-dds"
+    );
     assert_eq!(image_type_to_mime(ImageType::Exr), "image/aces");
     assert_eq!(image_type_to_mime(ImageType::Farbfeld), "image/farbfeld");
     assert_eq!(image_type_to_mime(ImageType::Hdr), "image/vnd.radiance");
