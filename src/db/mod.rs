@@ -2505,7 +2505,7 @@ mod tests {
       .execute(
         "INSERT INTO clipboard (contents, mime, content_hash, last_accessed) \
          VALUES (?1, 'text/plain', NULL, 0)",
-        rusqlite::params![b"legacy data".as_ref()],
+        rusqlite::params![&b"legacy data"[..]],
       )
       .expect("insert null-hash entry");
     let id: i64 = db
