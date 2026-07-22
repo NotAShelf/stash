@@ -21,9 +21,9 @@
 
 <div align="center">
   Lightweight & feature-rich Wayland clipboard "manager" with fast persistent
-  history and robust multi-media support. Stores and previews clipboard
-  entries (text, images) on the clipboard with a neat TUI and advanced
-  scripting capabilities.
+  history, robust multi-media support, encryption and more. Stash stores and
+  previews clipboard entries (text, images) on the clipboard with a neat TUI
+  and advanced scripting capabilities for your integration needs.
 </div>
 
 <div align="center">
@@ -36,8 +36,9 @@
 
 ## Features
 
-Stash is a feature-rich, yet simple and lightweight clipboard management utility
-with many features such as but not necessarily limited to:
+Stash is simple in design, and lightweight during operation but it remains a
+feature-rich clipboard management utility with _many_ features such as but
+necessarily limited to:
 
 - Automatic MIME detection for stored entries
 - Fast persistent storage using SQLite
@@ -74,9 +75,18 @@ features, or conveniences provided by Stash.
 
 ### With Nix
 
-Nix is the recommended way of downloading (and developing!) Stash. You can
-install it using Nix flakes using `nix profile add` if on non-nixos or add Stash
-as a flake input if you are on NixOS.
+Nix is the _recommended_ method for downloading (and developing!) Stash. As of
+26.11 , Stash is available as `pkgs.stash-clipboard` in Nixpkgs. You may use the
+NixOS module:
+
+```nix
+{
+  services.stash-clipboard.enable = true;
+}
+```
+
+Alternatively, you may install it using Nix flakes using `nix profile add` if on
+non-nixos or add Stash as a flake input if you are on NixOS.
 
 ```nix
 {
@@ -94,12 +104,10 @@ to make `stash` available in your system.
 {inputs, pkgs, ...}: let
   stashPkg = inputs.stash.packages.${pkgs.stdenv.hostPlatform}.stash;
 in {
-  environment.systemPackages = [stashPkg];
-
-  # Additionally feel free to add the Stash package in `systemd.packages` to
-  # automatically run the Stash watch daemon, which will watch your primary
-  # clipboard for changes and persist them.
-  systemd.packages = [stashPkg];
+  services.stash-clipboard = {
+    enable = true;
+    package = stashPkg;
+  };
 }
 ```
 
@@ -108,7 +116,10 @@ time with `nix run`.
 
 ```sh
 # Run directly from the git repository; will be garbage collected
-$ nix run github:NotAShelf/stash -- watch # start the watch daemon
+$ nix run github:NotAShelf/stash -- watch && # start the watch daemon in the background
+
+# Then once you copy something, retrieve it from the CLI:
+$ nix run github:NotAShelf/stash -- list --format tsv # emit --format for a TUI
 ```
 
 ### Without Nix
@@ -127,7 +138,8 @@ releases are made when a version gets tagged, and are available under
 - Build and install from source with Cargo:
 
   ```bash
-  cargo install stash-clipboard --locked
+  # Install Stash from crates.io using the latest published version
+  $ cargo install stash-clipboard --locked
   ```
 
 Additionally, you may get Stash from source via `cargo install` using
@@ -203,13 +215,16 @@ Options:
 ### Store an entry
 
 ```bash
-echo "some clipboard text" | stash store
+# Copy something to your clipboard from the terminal
+$ echo "some clipboard text" | stash store
 ```
 
 ### List entries
 
 ```bash
-stash list
+# List all entries in the database in a TUI (interactive terminals) or in TSV
+# format in non-interactive environments, e.g., your Bash scripts.
+$ stash list
 ```
 
 Stash list will list all entries in an interactive TUI that allows navigation
@@ -225,20 +240,23 @@ when using this flag, allowing you to inspect them before running cleanup.
 ### Decode an entry by ID
 
 ```bash
-stash decode <input ID>
+# Decode an entry with its given ID
+$ stash decode <input ID>
 ```
 
 > [!TIP]
 > Decoding from dmenu-compatible tools:
 >
 > ```bash
-> stash list | tofi | stash decode
+> # Display decoded entries in your own picker
+> $ stash list | tofi | stash decode
 > ```
 
 ### Delete entries matching a query
 
 ```bash
-stash delete --type [id | query] <text or ID>
+# Delete an entry by ID or exact query match
+$ stash delete --type [id | query] <text or ID>
 ```
 
 By default stash will try to guess the type of an entry, but this may not be
@@ -248,7 +266,8 @@ desirable for all users. If you wish to be explicit, pass `--type` to
 ### Delete multiple entries by ID (from a file or stdin)
 
 ```bash
-stash delete --type id < ids.txt
+# Delete all IDs from a given file
+$ stash delete --type id < ids.txt
 ```
 
 ### Database management
@@ -256,9 +275,10 @@ stash delete --type id < ids.txt
 Stash provides a `db` subcommand for database maintenance operations:
 
 ```bash
-stash db wipe [--expired] [--ask]
-stash db vacuum
-stash db stats
+# Common database maintenance commands
+$ stash db wipe [--expired] [--ask]
+$ stash db vacuum
+$ stash db stats
 ```
 
 - `stash db wipe`: Remove all entries from the database. Use `--expired` to only
@@ -273,7 +293,9 @@ stash db stats
 ### Watch clipboard for changes and store automatically
 
 ```bash
-stash watch
+# Start a Wayland clipboard watcher to forward Wayland clipboard entries
+# to the database.
+$ stash watch
 ```
 
 This runs a daemon that monitors the clipboard and stores new entries
@@ -308,7 +330,9 @@ multiple representations are available.
 Example: prefer images when running the watch daemon
 
 ```bash
-stash watch --mime-type image
+# You may override Stash's built-in priority and MIME type detection with
+# `--mime-type` to `stash watch`.
+$ stash watch --mime-type image
 ```
 
 This is useful when copying images from browsers or file managers where the
@@ -324,7 +348,8 @@ clears the clipboard. Stash can optionally keep the clipboard contents available
 after the source closes using the `--persist` flag.
 
 ```bash
-stash watch --persist
+# Persist the clipboard data after the source app is closed.
+$ stash watch --persist
 ```
 
 When enabled, Stash will fork a background process to serve the clipboard
@@ -425,7 +450,10 @@ window is focused will be skipped.
 > [!TIP]
 > **Example startup command for Stash daemon**:
 >
-> `stash --excluded-apps Bitwarden watch`
+> ```bash
+> # Exclude entries from applications matching this application **class**.
+> $ stash --excluded-apps Bitwarden watch
+> ```
 
 #### Clipboard Filtering by Password Manager Hint
 
@@ -435,8 +463,8 @@ and compatible password managers to signal that clipboard content is sensitive
 and should not be persisted.
 
 No configuration is required. If the hint is present in the clipboard offer, the
-entry is dropped before storage. The entry is still available in your clipboard
-— it is only excluded from the persistent database.
+entry is dropped before storage. The entry is still available in your clipboard;
+it is only excluded from the persistent database.
 
 > [!NOTE]
 > This filter only applies via the watch daemon (`stash watch`), where MIME type
@@ -472,13 +500,13 @@ Provide a passphrase in one of these ways (checked in order):
    LoadCredential=stash_encryption_passphrase:/etc/stash/encryption_passphrase
    ```
 
-2. **Command** — stdout of a shell command:
+2. **Command**, stdout of a shell command:
 
    ```bash
    export STASH_ENCRYPTION_PASSPHRASE_COMMAND="pass show stash/encryption-key"
    ```
 
-3. **File** — path to a file containing the passphrase:
+3. **File**, path to a file containing the passphrase:
 
    ```bash
    export STASH_ENCRYPTION_PASSPHRASE_FILE=/run/secrets/stash/encryption_passphrase
@@ -541,25 +569,29 @@ interoperability.
 **Export TSV from Cliphist:**
 
 ```bash
-cliphist list --db ~/.cache/cliphist/db > cliphist.tsv
+# Export Cliphist's database
+$ cliphist list --db ~/.cache/cliphist/db > cliphist.tsv
 ```
 
 **Import TSV into Stash:**
 
 ```bash
-stash import < cliphist.tsv
+# Read and import the TSV file produced by Cliphist
+$ stash import < cliphist.tsv
 ```
 
 **Export TSV from Stash:**
 
 ```bash
-stash list > stash.tsv
+# Export Stash's clipboard database as a TSV
+$ stash list > stash.tsv
 ```
 
 **Import TSV into Cliphist:**
 
 ```bash
-cliphist --import < stash.tsv
+# Import Stash's clipboard data into Cliphist
+$ cliphist --import < stash.tsv
 ```
 
 ### More Tricks
@@ -571,7 +603,7 @@ figured out something new, e.g. a neat shell trick, feel free to add it here!
    TUI. This is obvious if you have ever ran the command, but here are some
    things that you might not have known.
    - `stash list` displays the TUI _only_ if the user is in an interactive TTY.
-     E.g. if it's a Bash script, `stash list` **will output TSV**.
+     If it is invoked in, e.g., a Bash script, `stash list` **will output TSV**.
    - You can change the format with `--format` to e.g. JSON but you can also
      force a TSV format inside an interactive session with `--format tsv`.
    - `stash list` displays the mime type for newly recorded entries, but it will
@@ -581,7 +613,8 @@ figured out something new, e.g. a neat shell trick, feel free to add it here!
    `stash import --type tsv` to mimic importing from STDIN.
 
    ```bash
-   cliphist list --db ~/.cache/cliphist/db | stash import
+   # Best-effort importing from `cliphist list`
+   $ cliphist list --db ~/.cache/cliphist/db | stash import
    ```
 
 3. Stash provides common-compatible `wl-copy` and `wl-paste` implementations
@@ -623,10 +656,10 @@ useful for:
 
 ```bash
 # View all entries including expired ones
-stash list --expired
+$ stash list --expired
 
 # View expired entries in JSON format
-stash list --expired --format json
+$ stash list --expired --format json
 ```
 
 #### Cleaning Up Expired Entries
@@ -636,7 +669,7 @@ For manual cleanup, use:
 
 ```bash
 # Remove all expired entries from the database
-stash db wipe --expired
+$ stash db wipe --expired
 ```
 
 > [!NOTE]
@@ -693,6 +726,10 @@ you :)
 
 ## License
 
+<!--markdownlint-disable MD059-->
+
 This project is made available under Mozilla Public License (MPL) version 2.0.
 See [LICENSE](LICENSE) for more details on the exact conditions. An online copy
 is provided [here](https://www.mozilla.org/en-US/MPL/2.0/).
+
+<!--markdownlint-enable MD059-->
