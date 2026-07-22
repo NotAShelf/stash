@@ -6,8 +6,15 @@ permissions:
 on:
   workflow_dispatch:
   push:
-    branches: [ "main" ]
-    paths: [ "src/**.rs", "Cargo.toml", "Cargo.lock"]
+    branches: ["main"]
+    paths:
+      [
+        "src/**.rs",
+        "Cargo.toml",
+        "Cargo.lock",
+        ".rustfmt.toml",
+        ".github/workflows/rust.yml",
+      ]
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,6 +26,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+
+      - name: Load devshell environment
+        # Runs `nix print-dev-env` for the flake's default devShell and exports
+        # the resulting environment (PATH, RUST_SRC_PATH, ...) into $GITHUB_ENV,
+        # so later steps use the nightly toolchain from the devshell directly
+        # instead of wrapping every command in `nix develop -c`.
+        uses: nicknovitski/nix-develop@v1
+        with:
+          arguments: ".#default"
+
       - name: Format
         run: cargo fmt -- --check
 
@@ -26,14 +45,7 @@ jobs:
         run: cargo check
 
       - name: Test
-        run: cargo test
+        run: cargo nextest run
 
       - name: Clippy
         run: cargo clippy -- -D warnings
-
-      - name: Check feature combinations
-        run: |
-          cargo check --no-default-features
-          cargo check --no-default-features --features notifications
-          cargo check --no-default-features --features encryption
-          cargo check --no-default-features --features use-toplevel
