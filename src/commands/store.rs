@@ -40,6 +40,7 @@ impl StoreCommand for SqliteClipboardDb {
         max_size,
         None, // no pre-computed hash for CLI store
         None, // no mime types for CLI store
+        None, // no selected mime for CLI store
       )?;
       log::info!("entry stored");
     }

@@ -29,6 +29,7 @@ impl AsyncClipboardDb {
     max_size: usize,
     content_hash: Option<i64>,
     mime_types: Option<Vec<String>>,
+    selected_mime: Option<String>,
   ) -> Result<i64, StashError> {
     let path = self.db_path.clone();
     blocking::unblock(move || {
@@ -42,6 +43,7 @@ impl AsyncClipboardDb {
         max_size,
         content_hash,
         mime_types.as_deref(),
+        selected_mime.as_deref(),
       )
     })
     .await
@@ -164,6 +166,7 @@ mod tests {
           5_000_000,
           None,
           None,
+          None,
         )
         .await
         .expect("Failed to store entry");
@@ -200,6 +203,7 @@ mod tests {
           None,
           None,
           5_000_000,
+          None,
           None,
           None,
         )
@@ -241,6 +245,7 @@ mod tests {
           None,
           None,
           5_000_000,
+          None,
           None,
           None,
         )
@@ -299,6 +304,7 @@ mod tests {
           5_000_000,
           None,
           None,
+          None,
         )
         .await
         .expect("Failed with original");
@@ -311,6 +317,7 @@ mod tests {
           None,
           None,
           5_000_000,
+          None,
           None,
           None,
         )
@@ -352,8 +359,10 @@ mod tests {
           let db = async_db.clone();
           let data = format!("concurrent test {}", i).into_bytes();
           smol::spawn(async move {
-            db.store_entry(data, 100, 1000, None, None, 5_000_000, None, None)
-              .await
+            db.store_entry(
+              data, 100, 1000, None, None, 5_000_000, None, None, None,
+            )
+            .await
           })
         })
         .collect();
