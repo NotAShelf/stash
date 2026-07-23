@@ -283,6 +283,7 @@ pub trait ClipboardDb {
     max_size: usize,
     content_hash: Option<i64>,
     mime_types: Option<&[String]>,
+    selected_mime: Option<&str>,
   ) -> Result<i64, StashError>;
 
   fn trim_db(&self, max_items: u64) -> Result<(), StashError>;
@@ -572,6 +573,7 @@ impl ClipboardDb for SqliteClipboardDb {
     max_size: usize,
     content_hash: Option<i64>,
     mime_types: Option<&[String]>,
+    selected_mime: Option<&str>,
   ) -> Result<i64, StashError> {
     let mut buf = Vec::new();
     if input.read_to_end(&mut buf).is_err() || buf.is_empty() {
@@ -606,7 +608,9 @@ impl ClipboardDb for SqliteClipboardDb {
       hash
     });
 
-    let mime = crate::mime::detect_mime(&buf);
+    let mime = selected_mime
+      .map(str::to_owned)
+      .or_else(|| crate::mime::detect_mime(&buf));
 
     // Try to load regex from systemd credential file, then env var
     let regex = load_sensitive_regex();
@@ -653,6 +657,7 @@ impl ClipboardDb for SqliteClipboardDb {
       content_hash,
       max_dedupe_search,
       mime_types_json.as_deref(),
+      mime.as_deref(),
     )? {
       return Ok(id);
     }
@@ -928,6 +933,7 @@ impl SqliteClipboardDb {
     content_hash: i64,
     max: u64,
     mime_types_json: Option<&str>,
+    mime: Option<&str>,
   ) -> Result<Option<i64>, StashError> {
     let mut stmt = self
       .conn
@@ -958,14 +964,14 @@ impl SqliteClipboardDb {
         .map_err(|e| StashError::DeduplicationRemove(e.to_string().into()))?;
     }
 
-    // Move the kept entry to the top; refresh mime_types only when the new
-    // store provides them (COALESCE preserves the prior value otherwise).
+    // Move the kept entry to the top; refresh MIME metadata only when the new
+    // store provides it (COALESCE preserves the prior value otherwise).
     self
       .conn
       .execute(
         "UPDATE clipboard SET last_accessed = ?2, mime_types = COALESCE(?3, \
-         mime_types) WHERE id = ?1",
-        params![keep_id, Self::now() as i64, mime_types_json],
+         mime_types), mime = COALESCE(?4, mime) WHERE id = ?1",
+        params![keep_id, Self::now() as i64, mime_types_json, mime],
       )
       .map_err(|e| StashError::Store(e.to_string().into()))?;
 
@@ -1738,6 +1744,7 @@ mod tests {
         DEFAULT_MAX_ENTRY_SIZE,
         None,
         None,
+        None,
       )
       .expect("Failed to store entry");
 
@@ -1762,6 +1769,7 @@ mod tests {
         DEFAULT_MAX_ENTRY_SIZE,
         None,
         None,
+        None,
       )
       .expect("Failed to store URI list");
 
@@ -1772,6 +1780,27 @@ mod tests {
       })
       .expect("Failed to get mime");
     assert_eq!(mime, Some("text/uri-list".to_string()));
+  }
+
+  #[test]
+  fn test_store_preserves_selected_file_operation_mime() {
+    let db = test_db();
+    let id = db
+      .store_entry(
+        std::io::Cursor::new(b"cut\nfile:///tmp/example".to_vec()),
+        100,
+        1000,
+        None,
+        None,
+        DEFAULT_MAX_ENTRY_SIZE,
+        None,
+        Some(&["x-special/gnome-copied-files".to_string()]),
+        Some("x-special/gnome-copied-files"),
+      )
+      .expect("Failed to store file operation");
+
+    let (_, _, mime) = db.copy_entry(id).expect("Failed to copy entry");
+    assert_eq!(mime.as_deref(), Some("x-special/gnome-copied-files"));
   }
 
   #[test]
@@ -1795,6 +1824,7 @@ mod tests {
         None,
         None,
         DEFAULT_MAX_ENTRY_SIZE,
+        None,
         None,
         None,
       )
@@ -1835,6 +1865,7 @@ mod tests {
       DEFAULT_MAX_ENTRY_SIZE,
       None,
       None,
+      None,
     )
     .expect("Failed to store image");
 
@@ -1862,6 +1893,7 @@ mod tests {
       None,
       None,
       DEFAULT_MAX_ENTRY_SIZE,
+      None,
       None,
       None,
     )
@@ -1947,6 +1979,7 @@ mod tests {
         DEFAULT_MAX_ENTRY_SIZE,
         None,
         None,
+        None,
       )
       .expect("Failed to store first");
     let id2 = db
@@ -1957,6 +1990,7 @@ mod tests {
         None,
         None,
         DEFAULT_MAX_ENTRY_SIZE,
+        None,
         None,
         None,
       )
@@ -2001,6 +2035,7 @@ mod tests {
         DEFAULT_MAX_ENTRY_SIZE,
         None,
         None,
+        None,
       )
       .expect("Failed to store");
     }
@@ -2024,6 +2059,7 @@ mod tests {
       DEFAULT_MAX_ENTRY_SIZE,
       None,
       None,
+      None,
     );
     assert!(matches!(result, Err(StashError::EmptyOrTooLarge)));
   }
@@ -2038,6 +2074,7 @@ mod tests {
       None,
       None,
       DEFAULT_MAX_ENTRY_SIZE,
+      None,
       None,
       None,
     );
@@ -2058,6 +2095,7 @@ mod tests {
       DEFAULT_MAX_ENTRY_SIZE,
       None,
       None,
+      None,
     );
     assert!(matches!(result, Err(StashError::TooLarge(5000000))));
   }
@@ -2073,6 +2111,7 @@ mod tests {
         None,
         None,
         DEFAULT_MAX_ENTRY_SIZE,
+        None,
         None,
         None,
       )
@@ -2103,6 +2142,7 @@ mod tests {
       DEFAULT_MAX_ENTRY_SIZE,
       None,
       None,
+      None,
     )
     .expect("Failed to store");
     db.store_entry(
@@ -2112,6 +2152,7 @@ mod tests {
       None,
       None,
       DEFAULT_MAX_ENTRY_SIZE,
+      None,
       None,
       None,
     )
@@ -2141,6 +2182,7 @@ mod tests {
         None,
         None,
         DEFAULT_MAX_ENTRY_SIZE,
+        None,
         None,
         None,
       )
@@ -2222,6 +2264,7 @@ mod tests {
         None,
         None,
         DEFAULT_MAX_ENTRY_SIZE,
+        None,
         None,
         None,
       )
@@ -2308,6 +2351,7 @@ mod tests {
         None,
         None,
         DEFAULT_MAX_ENTRY_SIZE,
+        None,
         None,
         None,
       )
@@ -2544,6 +2588,7 @@ mod tests {
           None,
           None,
           DEFAULT_MAX_ENTRY_SIZE,
+          None,
           None,
           None,
         )
