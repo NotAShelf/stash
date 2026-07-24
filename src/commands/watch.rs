@@ -163,38 +163,7 @@ fn negotiate_mime_type(
     return Ok((Box::new(reader) as Box<dyn Read>, mime_str, offered));
   }
 
-  let chosen = if preference == "image" {
-    // Pick the first offered image type, fall back to first overall
-    offered
-      .iter()
-      .find(|m| m.starts_with("image/"))
-      .or_else(|| offered.first())
-  } else {
-    // XXX: When preference is "any", deprioritize HTML-flavored types if a
-    // more concrete type is available. Browsers and Electron apps put
-    // text/html first even for "Copy Image", but the HTML is just a wrapper
-    // (<img src="...">), i.e., never what the user wants in a clipboard
-    // manager. Firefox also lists Mozilla-internal wrappers
-    // (text/_moz_htmlcontext, text/_moz_htmlinfo) ahead of the plain-text
-    // representation, and those are UTF-16 encoded, so storing them mislabels
-    // the entry as text/plain and truncates at the first NUL byte on paste.
-    // Prefer image/* first, then any non-HTML-like type, and fall back to the
-    // HTML wrapper only as a last resort.
-    let has_image = offered.iter().any(|m| m.starts_with("image/"));
-    if has_image {
-      offered
-        .iter()
-        .find(|m| m.starts_with("image/"))
-        .or_else(|| offered.first())
-    } else if offered.first().is_some_and(|m| is_html_like(m)) {
-      offered
-        .iter()
-        .find(|m| !is_html_like(m))
-        .or_else(|| offered.first())
-    } else {
-      offered.first()
-    }
-  };
+  let chosen = pick_mime(&offered, preference);
 
   match chosen {
     Some(mime_str) => {
@@ -395,6 +364,7 @@ impl WatchCommand for SqliteClipboardDb {
                   max_size,
                   content_hash,
                   Some(mime_types_for_persist.clone()),
+                  Some(selected_mime.clone()),
                 )
                 .await
               {
@@ -503,10 +473,11 @@ impl WatchCommand for SqliteClipboardDb {
   }
 }
 
-/// Given ordered offers and a preference, return the
-/// chosen MIME type. This mirrors the selection logic in
-/// [`negotiate_mime_type`] without requiring a Wayland connection.
-#[cfg(test)]
+/// Given ordered offers and a preference, return the chosen MIME type.
+///
+/// For the default preference, images win over HTML wrappers; otherwise plain
+/// text wins over URI lists and other non-HTML representations when the offer
+/// begins with an HTML wrapper.
 fn pick_mime<'a>(
   offered: &'a [String],
   preference: &str,
@@ -526,7 +497,8 @@ fn pick_mime<'a>(
     } else if offered.first().is_some_and(|m| is_html_like(m)) {
       offered
         .iter()
-        .find(|m| !is_html_like(m))
+        .find(|m| m.as_str() == "text/plain" || m.starts_with("text/plain;"))
+        .or_else(|| offered.iter().find(|m| !is_html_like(m)))
         .or_else(|| offered.first())
     } else {
       offered.first()
@@ -598,6 +570,19 @@ mod tests {
     // html + plain with no image type; plain text wins over html.
     let offered = vec!["text/html".to_string(), "text/plain".to_string()];
     assert_eq!(pick_mime(&offered, "any").unwrap(), "text/plain");
+  }
+
+  #[test]
+  fn test_pick_plain_text_over_uri_list_after_html() {
+    let offered = vec![
+      "text/html".to_string(),
+      "text/uri-list".to_string(),
+      "text/plain;charset=utf-8".to_string(),
+    ];
+    assert_eq!(
+      pick_mime(&offered, "any").unwrap(),
+      "text/plain;charset=utf-8"
+    );
   }
 
   #[test]
