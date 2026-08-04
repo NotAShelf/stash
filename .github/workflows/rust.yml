@@ -13,6 +13,10 @@ on:
         "Cargo.toml",
         "Cargo.lock",
         ".rustfmt.toml",
+        "flake.nix",
+        "flake.lock",
+        "nix/**",
+        "tests/**.rs",
         ".github/workflows/rust.yml",
       ]
 
@@ -49,3 +53,17 @@ jobs:
 
       - name: Clippy
         run: cargo clippy -- -D warnings
+
+  # TODO: make this use a build matrix if we ever add more tests.
+  # Also TODO: give Nix workflows their own file and split cache workflow
+  wayland-vm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+
+      - name: Run Wayland VM integration test
+        run: nix build .#checks.x86_64-linux.wayland --print-build-logs
