@@ -19,10 +19,19 @@
     };
 
     packages = forEachSystem (system: let
-      craneLib = crane.mkLib pkgsForEach.${system};
+      pkgs = pkgsForEach.${system};
+      craneLib = crane.mkLib pkgs;
     in {
-      stash = pkgsForEach.${system}.callPackage ./nix/package.nix {inherit craneLib;};
+      stash = pkgs.callPackage ./nix/package.nix {inherit craneLib;};
       default = self.packages.${system}.stash;
+    });
+
+    checks = forEachSystem (system: let
+      pkgs = pkgsForEach.${system};
+    in {
+      wayland = pkgs.callPackage ./nix/tests/wayland.nix {
+        inherit (self.packages.${system}) stash;
+      };
     });
 
     devShells = forEachSystem (system: {
