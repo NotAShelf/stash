@@ -5,6 +5,8 @@
 !/nix
 !/src
 !/contrib
+!/tests
+!/tests/**
 
 # Rust/Cargo
 !/Cargo.lock
