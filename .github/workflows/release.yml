@@ -18,7 +18,7 @@ jobs:
     uses: manic-systems/workflows/.github/workflows/rust-release.yml@3c68b9cc74e235c335e401823b732530444f3768
     with:
       stage: prepare
-      version-command: nix run nixpkgs#fq -- -r '.package.version' Cargo.toml
+      version-command: nix run nixpkgs#fq -- -r .package.version Cargo.toml
 
   build:
     needs: prepare
