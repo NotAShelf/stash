@@ -22,9 +22,18 @@ jobs:
       install-nix: false
       flake-check: false
       rust-toolchain: "1.95.0"
-      fmt: true
       clippy: true
       test: true
+
+  fmt:
+    name: Rust formatting
+    uses: manic-systems/workflows/.github/workflows/rust-checks.yml@3c68b9cc74e235c335e401823b732530444f3768
+    with:
+      os: ubuntu-latest
+      install-nix: false
+      flake-check: false
+      rust-toolchain: nightly
+      fmt: true
 
   checks:
     name: Nix check (${{ matrix.check }})
