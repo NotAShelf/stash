@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo:
+    name: Cargo checks
+    uses: manic-systems/workflows/.github/workflows/rust-checks.yml@3c68b9cc74e235c335e401823b732530444f3768
+    with:
+      os: ubuntu-latest
+      install-nix: false
+      flake-check: false
+      rust-toolchain: "1.95.0"
+      fmt: true
+      clippy: true
+      test: true
+
+  checks:
+    name: Nix check (${{ matrix.check }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - check: wayland
+            system: x86_64-linux
+            os: ubuntu-latest
+    uses: manic-systems/workflows/.github/workflows/rust-checks.yml@3c68b9cc74e235c335e401823b732530444f3768
+    with:
+      os: ${{ matrix.os }}
+      flake-check-command: nix build .#checks.${{ matrix.system }}.${{ matrix.check }} --print-build-logs
+
+  build:
+    name: Nix build (${{ matrix.system }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            os: ubuntu-latest
+          - system: aarch64-linux
+            os: ubuntu-24.04-arm
+    uses: manic-systems/workflows/.github/workflows/rust-build.yml@3c68b9cc74e235c335e401823b732530444f3768
+    with:
+      os: ${{ matrix.os }}

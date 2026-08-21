@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  prepare:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    uses: manic-systems/workflows/.github/workflows/rust-release.yml@3c68b9cc74e235c335e401823b732530444f3768
+    with:
+      stage: prepare
+      version-command: nix run nixpkgs#fq -- -r '.package.version' Cargo.toml
+
+  build:
+    needs: prepare
+    if: needs.prepare.result == 'success' && needs.prepare.outputs.skip != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            suffix: linux-amd64
+          - os: ubuntu-24.04-arm
+            suffix: linux-arm64
+    uses: manic-systems/workflows/.github/workflows/rust-build.yml@3c68b9cc74e235c335e401823b732530444f3768
+    with:
+      upload: true
+      version: ${{ needs.prepare.outputs.version }}
+      os: ${{ matrix.os }}
+      suffix: ${{ matrix.suffix }}
+      binary-name: stash
+      asset-prefix: stash
+
+  finalize:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.skip != 'true' && needs.build.result == 'success'
+    uses: manic-systems/workflows/.github/workflows/rust-release.yml@3c68b9cc74e235c335e401823b732530444f3768
+    with:
+      stage: finalize
+      version: ${{ needs.prepare.outputs.version }}
+      asset-prefix: stash
