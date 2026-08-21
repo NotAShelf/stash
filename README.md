@@ -7,14 +7,20 @@
 <div align="center">
     <a alt="CI Status" href="https://github.com/NotAShelf/stash/actions">
         <img
-          src="https://github.com/NotAShelf/stash/actions/workflows/rust.yml/badge.svg"
-          alt="Build Status"
+          src="https://github.com/NotAShelf/stash/actions/workflows/ci.yml/badge.svg"
+          alt="CI Status"
         />
     </a>
     <a alt="Dependencies" href="https://deps.rs/repo/github/notashelf/stash">
         <img
           src="https://deps.rs/repo/github/notashelf/stash/status.svg"
           alt="Dependency Status"
+        />
+    </a>
+    <a alt="CodeQL Scan" href="https://github.com/NotAShelf/stash/actions/workflows/github-code-scanning/codeql">
+        <img
+          src="https://github.com/NotAShelf/stash/actions/workflows/github-code-scanning/codeql/badge.svg"
+          alt="CodeQL Scan"
         />
     </a>
 </div>
