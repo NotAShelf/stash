@@ -115,16 +115,12 @@ fn prepare_clipboard_copy(
   opts.serve_requests(ServeRequests::Only(MAX_SERVE_REQUESTS));
   opts.foreground(true); // we'll fork manually for better control
 
-  // Determine MIME type for the primary offer
-  let mime_type = if data.selected_mime.starts_with("text/") {
-    CopyMimeType::Text
-  } else {
-    CopyMimeType::Specific(data.selected_mime.clone())
-  };
-
   // Prepare the copy
   let prepared = opts
-    .prepare_copy(Source::Bytes(data.content.clone().into()), mime_type)
+    .prepare_copy(
+      Source::Bytes(data.content.clone().into()),
+      CopyMimeType::Specific(data.selected_mime.clone()),
+    )
     .map_err(|e| PersistenceError::PrepareFailed(e.to_string()))?;
 
   Ok(prepared)

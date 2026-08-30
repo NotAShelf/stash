@@ -1,17 +1,18 @@
 {
-  pkgs,
+  testers,
   stash,
+  sway-unwrapped,
 }:
-pkgs.testers.runNixOSTest {
+testers.runNixOSTest {
   name = "stash-wayland";
 
-  nodes.machine = {pkgs, ...}: {
+  nodes.machine = {
     users.users.alice = {
       isNormalUser = true;
       uid = 1000;
     };
 
-    environment.systemPackages = [stash];
+    environment.systemPackages = [stash]; # no need to enable systemd service
     hardware.graphics.enable = true;
 
     services = {
@@ -19,7 +20,7 @@ pkgs.testers.runNixOSTest {
       greetd = {
         enable = true;
         settings.default_session = {
-          command = "${pkgs.sway-unwrapped}/bin/sway --config /dev/null";
+          command = "${sway-unwrapped}/bin/sway --config /dev/null";
           user = "alice";
         };
       };
@@ -87,5 +88,55 @@ pkgs.testers.runNixOSTest {
             )
         )
         machine.succeed("kill $(cat /tmp/stash-watch.pid)")
+
+    with subtest("stash persistence preserves uri-list"):
+        machine.succeed(
+            alice(
+                f"printf baseline | {WAYLAND_CLIENT} "
+                "wl-copy --type text/plain >/dev/null 2>&1"
+            )
+        )
+        machine.succeed(
+            alice(
+                f"{WAYLAND_CLIENT} stash "
+                "--db-path /tmp/stash-persist.sqlite watch --persist "
+                "> /tmp/stash-persist.log 2>&1 & "
+                "echo $! > /tmp/stash-persist.pid"
+            )
+        )
+        machine.sleep(1)
+        machine.succeed(
+            "systemd-run --quiet --unit=stash-uri-source --uid=alice "
+            "--setenv=XDG_RUNTIME_DIR=/run/user/1000 "
+            "--setenv=WAYLAND_DISPLAY=wayland-1 /bin/sh -c "
+            + shlex.quote(
+                "printf 'file:///tmp/stash-uri-list.webp\\n' | "
+                "/run/current-system/sw/bin/wl-copy --foreground "
+                "--paste-once --omit-additional-text-mime-types "
+                "--type text/uri-list"
+            )
+        )
+        machine.wait_for_unit("stash-uri-source.service")
+        machine.wait_until_fails(
+            "systemctl is-active stash-uri-source.service"
+        )
+        machine.wait_until_succeeds(
+            alice(
+                f"{WAYLAND_CLIENT} wl-paste --list-types | "
+                "grep -Fx text/uri-list"
+            )
+        )
+        machine.succeed(
+            alice(
+                f"{WAYLAND_CLIENT} wl-paste --no-newline "
+                "--type text/uri-list > /tmp/stash-uri-list && "
+                "printf 'file:///tmp/stash-uri-list.webp\\n' | "
+                "cmp - /tmp/stash-uri-list"
+            )
+        )
+        machine.succeed(
+            alice(f"{WAYLAND_CLIENT} wl-copy --clear >/dev/null 2>&1")
+        )
+        machine.succeed("kill $(cat /tmp/stash-persist.pid)")
   '';
 }
