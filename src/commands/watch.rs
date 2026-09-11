@@ -258,6 +258,8 @@ impl WatchCommand for SqliteClipboardDb {
     }
 
     let poll_interval = Duration::from_millis(500);
+    let max_retry_interval = Duration::from_secs(30);
+    let mut retry_interval = poll_interval;
 
     loop {
       // Process any pending expirations that are due now
@@ -333,9 +335,13 @@ impl WatchCommand for SqliteClipboardDb {
           buf.clear();
           if let Err(e) = reader.read_to_end(&mut buf) {
             log::error!("failed to read clipboard contents: {e}");
-            Timer::after(Duration::from_millis(500)).await;
+            retry_interval =
+              retry_interval.saturating_mul(2).min(max_retry_interval);
+            Timer::after(retry_interval).await;
             continue;
           }
+
+          retry_interval = poll_interval;
 
           // Only store if changed and not empty
           if !buf.is_empty() {
@@ -455,6 +461,8 @@ impl WatchCommand for SqliteClipboardDb {
           let error_msg = e.to_string();
           if !error_msg.contains("empty") {
             log::error!("failed to get clipboard contents: {e}");
+            retry_interval =
+              retry_interval.saturating_mul(2).min(max_retry_interval);
           }
         },
       }
@@ -468,7 +476,7 @@ impl WatchCommand for SqliteClipboardDb {
       } else {
         poll_interval
       };
-      Timer::after(sleep_duration).await;
+      Timer::after(sleep_duration.max(retry_interval)).await;
     }
   }
 }
