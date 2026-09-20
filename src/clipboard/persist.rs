@@ -13,7 +13,8 @@ use wl_clipboard_rs::copy::{
 };
 
 /// Maximum number of paste requests to serve before exiting. This (hopefully)
-/// prevents runaway processes while still providing persistence.
+/// bounds the lifetime of a stale persistence child if the compositor does not
+/// revoke its selection cleanly.
 const MAX_SERVE_REQUESTS: usize = 1000;
 
 /// PID of the current clipboard persistence child process. Used to detect when
@@ -157,10 +158,19 @@ fn fork_and_serve(prepared: PreparedCopy) -> PersistenceResult<()> {
     log::debug!("terminated prior persistence child (pid: {prior})");
   }
 
-  // SAFETY: after fork, the child immediately serves the prepared Wayland copy
-  // and exits without returning to the async runtime.
   match unsafe { libc::fork() } {
     0 => {
+      // Ensure a persistence child cannot outlive the watcher that created it.
+      // This matters when the watcher is stopped: the child otherwise remains
+      // a detached Wayland clipboard owner with the copied data in memory.
+      // SAFETY: prctl only changes this child process's death notification.
+      unsafe {
+        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+      }
+      if unsafe { libc::getppid() } != unsafe { libc::getpid() } {
+        exit(0);
+      }
+
       // Child process - clear serving PID
       SERVING_PID.store(0, Ordering::SeqCst);
       serve_clipboard_child(prepared);
