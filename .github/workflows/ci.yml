@@ -16,7 +16,7 @@ concurrency:
 jobs:
   cargo:
     name: Cargo checks
-    uses: manic-systems/workflows/.github/workflows/rust-checks.yml@3c68b9cc74e235c335e401823b732530444f3768
+    uses: manic-systems/workflows/.github/workflows/rust-checks.yml@c6f105d06833433a442f13b1aee61ca9da9624d6
     with:
       os: ubuntu-latest
       install-nix: false
@@ -27,7 +27,7 @@ jobs:
 
   fmt:
     name: Rust formatting
-    uses: manic-systems/workflows/.github/workflows/rust-checks.yml@3c68b9cc74e235c335e401823b732530444f3768
+    uses: manic-systems/workflows/.github/workflows/rust-checks.yml@c6f105d06833433a442f13b1aee61ca9da9624d6
     with:
       os: ubuntu-latest
       install-nix: false
@@ -44,7 +44,7 @@ jobs:
           - check: wayland
             system: x86_64-linux
             os: ubuntu-latest
-    uses: manic-systems/workflows/.github/workflows/rust-checks.yml@3c68b9cc74e235c335e401823b732530444f3768
+    uses: manic-systems/workflows/.github/workflows/rust-checks.yml@c6f105d06833433a442f13b1aee61ca9da9624d6
     with:
       os: ${{ matrix.os }}
       flake-check-command: nix build .#checks.${{ matrix.system }}.${{ matrix.check }} --print-build-logs
@@ -59,6 +59,6 @@ jobs:
             os: ubuntu-latest
           - system: aarch64-linux
             os: ubuntu-24.04-arm
-    uses: manic-systems/workflows/.github/workflows/rust-build.yml@3c68b9cc74e235c335e401823b732530444f3768
+    uses: manic-systems/workflows/.github/workflows/rust-build.yml@c6f105d06833433a442f13b1aee61ca9da9624d6
     with:
       os: ${{ matrix.os }}
