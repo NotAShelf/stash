@@ -4,7 +4,7 @@
   stdenv,
   mold,
   versionCheckHook,
-  useMold ? stdenv.isLinux,
+  useMold ? stdenv.hostPlatform.isLinux,
   createSymlinks ? true,
 }: let
   pname = "stash";
