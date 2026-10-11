@@ -347,8 +347,13 @@ impl SqliteClipboardDb {
           format!("failed to set synchronous pragma: {e}").into(),
         )
       })?;
-    conn.pragma_update(None, "cache_size", "-256") // 256KB cache
-      .map_err(|e| StashError::Store(format!("failed to set cache_size pragma: {e}").into()))?;
+    conn
+      .pragma_update(None, "cache_size", "-256") // 256KB cache
+      .map_err(|e| {
+        StashError::Store(
+          format!("failed to set cache_size pragma: {e}").into(),
+        )
+      })?;
     conn
       .pragma_update(None, "temp_store", "memory")
       .map_err(|e| {
@@ -356,10 +361,16 @@ impl SqliteClipboardDb {
           format!("failed to set temp_store pragma: {e}").into(),
         )
       })?;
-    conn.pragma_update(None, "mmap_size", "0") // disable mmap
-      .map_err(|e| StashError::Store(format!("failed to set mmap_size pragma: {e}").into()))?;
-    conn.pragma_update(None, "page_size", "512") // small(er) pages
-      .map_err(|e| StashError::Store(format!("failed to set page_size pragma: {e}").into()))?;
+    conn
+      .pragma_update(None, "mmap_size", "0") // disable mmap
+      .map_err(|e| {
+        StashError::Store(format!("failed to set mmap_size pragma: {e}").into())
+      })?;
+    conn
+      .pragma_update(None, "page_size", "512") // small(er) pages
+      .map_err(|e| {
+        StashError::Store(format!("failed to set page_size pragma: {e}").into())
+      })?;
 
     let tx = conn.transaction().map_err(|e| {
       StashError::Store(
