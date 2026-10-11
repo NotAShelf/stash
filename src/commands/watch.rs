@@ -490,27 +490,23 @@ fn pick_mime<'a>(
   offered: &'a [String],
   preference: &str,
 ) -> Option<&'a String> {
+  let first = offered.first();
+  let image = offered.iter().find(|mime| mime.starts_with("image/"));
+
   if preference == "image" {
+    image.or(first)
+  } else if image.is_some() {
+    image
+  } else if first.is_some_and(|mime| is_html_like(mime)) {
     offered
       .iter()
-      .find(|m| m.starts_with("image/"))
-      .or_else(|| offered.first())
+      .find(|mime| {
+        mime.as_str() == "text/plain" || mime.starts_with("text/plain;")
+      })
+      .or_else(|| offered.iter().find(|mime| !is_html_like(mime)))
+      .or(first)
   } else {
-    let has_image = offered.iter().any(|m| m.starts_with("image/"));
-    if has_image {
-      offered
-        .iter()
-        .find(|m| m.starts_with("image/"))
-        .or_else(|| offered.first())
-    } else if offered.first().is_some_and(|m| is_html_like(m)) {
-      offered
-        .iter()
-        .find(|m| m.as_str() == "text/plain" || m.starts_with("text/plain;"))
-        .or_else(|| offered.iter().find(|m| !is_html_like(m)))
-        .or_else(|| offered.first())
-    } else {
-      offered.first()
-    }
+    first
   }
 }
 
