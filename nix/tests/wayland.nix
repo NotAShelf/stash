@@ -134,9 +134,9 @@ testers.runNixOSTest {
                 "cmp - /tmp/stash-uri-list"
             )
         )
-        machine.succeed(
-            alice(f"{WAYLAND_CLIENT} wl-copy --clear >/dev/null 2>&1")
-        )
         machine.succeed("kill $(cat /tmp/stash-persist.pid)")
+        machine.wait_until_fails(
+            alice(f"{WAYLAND_CLIENT} wl-paste --list-types")
+        )
   '';
 }

@@ -158,6 +158,10 @@ fn fork_and_serve(prepared: PreparedCopy) -> PersistenceResult<()> {
     log::debug!("terminated prior persistence child (pid: {prior})");
   }
 
+  // Capture the watcher PID before fork so the child can detect parent death
+  // between fork and installing the death notification.
+  let parent_pid = unsafe { libc::getpid() };
+
   match unsafe { libc::fork() } {
     0 => {
       // Ensure a persistence child cannot outlive the watcher that created it.
@@ -167,7 +171,7 @@ fn fork_and_serve(prepared: PreparedCopy) -> PersistenceResult<()> {
       unsafe {
         libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
       }
-      if unsafe { libc::getppid() } != unsafe { libc::getpid() } {
+      if unsafe { libc::getppid() } != parent_pid {
         exit(0);
       }
 
