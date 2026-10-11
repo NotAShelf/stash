@@ -483,27 +483,30 @@ impl WatchCommand for SqliteClipboardDb {
 
 /// Given ordered offers and a preference, return the chosen MIME type.
 ///
-/// For the default preference, images win over HTML wrappers; otherwise plain
-/// text wins over URI lists and other non-HTML representations when the offer
-/// begins with an HTML wrapper.
+/// Chromium's internal metadata is not clipboard content. Among usable offers,
+/// images win over HTML wrappers; otherwise plain text wins when the first
+/// usable offer is an HTML wrapper. Other formats retain source ordering.
 fn pick_mime<'a>(
   offered: &'a [String],
   preference: &str,
 ) -> Option<&'a String> {
-  let first = offered.first();
-  let image = offered.iter().find(|mime| mime.starts_with("image/"));
+  let usable = offered
+    .iter()
+    .filter(|mime| !mime.starts_with("chromium/x-internal-"));
+  let first = usable.clone().next();
+  let image = usable.clone().find(|mime| mime.starts_with("image/"));
 
   if preference == "image" {
     image.or(first)
   } else if image.is_some() {
     image
   } else if first.is_some_and(|mime| is_html_like(mime)) {
-    offered
-      .iter()
+    usable
+      .clone()
       .find(|mime| {
         mime.as_str() == "text/plain" || mime.starts_with("text/plain;")
       })
-      .or_else(|| offered.iter().find(|mime| !is_html_like(mime)))
+      .or_else(|| usable.clone().find(|mime| !is_html_like(mime)))
       .or(first)
   } else {
     first
@@ -513,6 +516,41 @@ fn pick_mime<'a>(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn test_electron_private_metadata_is_not_content() {
+    let token = "chromium/x-internal-source-rfh-token";
+    let cases = [
+      (vec![token, "text/plain"], Some("text/plain")),
+      (
+        vec![token, "text/html", "text/plain;charset=utf-8"],
+        Some("text/plain;charset=utf-8"),
+      ),
+      (vec![token, "text/plain", "image/png"], Some("image/png")),
+      (
+        vec![token, "text/uri-list", "text/plain"],
+        Some("text/uri-list"),
+      ),
+      (vec![token, "application/json"], Some("application/json")),
+      (
+        vec![token, "chromium/x-internal-custom-data", "text/plain"],
+        Some("text/plain"),
+      ),
+      (vec![token], None),
+    ];
+
+    for (types, expected) in cases {
+      let offered: Vec<String> = types.into_iter().map(String::from).collect();
+      assert_eq!(
+        pick_mime(&offered, "any").map(String::as_str),
+        expected,
+        "offered MIME types: {offered:?}",
+      );
+    }
+
+    let offered = vec![token.to_string(), "text/plain".to_string()];
+    assert_eq!(pick_mime(&offered, "image").unwrap(), "text/plain");
+  }
 
   #[test]
   fn test_pick_first_offered() {
