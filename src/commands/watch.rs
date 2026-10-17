@@ -16,6 +16,7 @@ use crate::{
   clipboard::{self, ClipboardData},
   db::{SqliteClipboardDb, nonblocking::AsyncClipboardDb},
   hash::Fnv1aHasher,
+  mime::{is_x11_text_atom, normalize_x11_text},
 };
 
 /// Wrapper to provide [`Ord`] implementation for `f64` by negating values.
@@ -348,12 +349,18 @@ impl WatchCommand for SqliteClipboardDb {
             let current_hash = hash_contents(&buf);
             if last_hash != Some(current_hash) {
               // Clone buf for the async operation since it needs 'static
-              let buf_clone = buf.clone();
+              let (stored_mime, buf_clone) =
+                normalize_x11_text(&_mime_type, buf.clone());
+              let stored_hash = if _mime_type == "STRING" {
+                hash_contents(&buf_clone)
+              } else {
+                current_hash
+              };
               #[expect(
                 clippy::cast_possible_wrap,
                 reason = "stored hash preserves the u64 bit pattern in sqlite"
               )]
-              let content_hash = Some(current_hash as i64);
+              let content_hash = Some(stored_hash as i64);
 
               // Clone data for persistence after successful store
               let buf_for_persist = buf.clone();
@@ -370,7 +377,7 @@ impl WatchCommand for SqliteClipboardDb {
                   max_size,
                   content_hash,
                   Some(mime_types_for_persist.clone()),
-                  Some(selected_mime.clone()),
+                  Some(stored_mime),
                 )
                 .await
               {
@@ -485,7 +492,8 @@ impl WatchCommand for SqliteClipboardDb {
 ///
 /// Chromium's internal metadata is not clipboard content. Among usable offers,
 /// images win over HTML wrappers; otherwise plain text wins when the first
-/// usable offer is an HTML wrapper. Other formats retain source ordering.
+/// usable offer is an HTML wrapper or an X11 text atom (`UTF8_STRING`, etc).
+/// Other formats retain source ordering.
 fn pick_mime<'a>(
   offered: &'a [String],
   preference: &str,
@@ -495,18 +503,25 @@ fn pick_mime<'a>(
     .filter(|mime| !mime.starts_with("chromium/x-internal-"));
   let first = usable.clone().next();
   let image = usable.clone().find(|mime| mime.starts_with("image/"));
+  let plain = usable.clone().find(|mime| {
+    mime.as_str() == "text/plain" || mime.starts_with("text/plain;")
+  });
 
   if preference == "image" {
     image.or(first)
   } else if image.is_some() {
     image
   } else if first.is_some_and(|mime| is_html_like(mime)) {
-    usable
-      .clone()
-      .find(|mime| {
-        mime.as_str() == "text/plain" || mime.starts_with("text/plain;")
-      })
+    plain
       .or_else(|| usable.clone().find(|mime| !is_html_like(mime)))
+      .or(first)
+  } else if first.is_some_and(|mime| is_x11_text_atom(mime)) {
+    plain
+      .or_else(|| {
+        ["UTF8_STRING", "TEXT", "STRING"]
+          .into_iter()
+          .find_map(|atom| usable.clone().find(|mime| *mime == atom))
+      })
       .or(first)
   } else {
     first
@@ -527,6 +542,11 @@ mod tests {
         Some("text/plain;charset=utf-8"),
       ),
       (vec![token, "text/plain", "image/png"], Some("image/png")),
+      (
+        vec!["UTF8_STRING", "text/plain;charset=utf-8", "STRING", "TEXT"],
+        Some("text/plain;charset=utf-8"),
+      ),
+      (vec!["UTF8_STRING", "STRING"], Some("UTF8_STRING")),
       (
         vec![token, "text/uri-list", "text/plain"],
         Some("text/uri-list"),
