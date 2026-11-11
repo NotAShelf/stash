@@ -39,6 +39,33 @@ pub fn detect_mime(data: &[u8]) -> Option<String> {
   None
 }
 
+/// Whether a MIME type is an X11 atom for text
+pub fn is_x11_text_atom(mime: &str) -> bool {
+  matches!(mime, "UTF8_STRING" | "STRING" | "TEXT" | "COMPOUND_TEXT")
+}
+
+/// Relabel X11 text atoms as `text/plain;charset=utf-8` before storing them.
+/// Transcodes non-UTF-8 text formats.
+pub fn normalize_x11_text(mime: &str, data: Vec<u8>) -> (String, Vec<u8>) {
+  let data = match mime {
+    "UTF8_STRING" | "TEXT" => data,
+    "STRING" => {
+      match String::from_utf8(data) {
+        Ok(text) => text.into_bytes(),
+        Err(e) => {
+          e.into_bytes()
+            .into_iter()
+            .map(char::from)
+            .collect::<String>()
+            .into_bytes()
+        },
+      }
+    },
+    _ => return (mime.to_owned(), data),
+  };
+  ("text/plain;charset=utf-8".to_owned(), data)
+}
+
 /// Convert [`imagesize`] [`ImageType`] to MIME type string
 fn image_type_to_mime(img_type: ImageType) -> String {
   let mime = match img_type {
